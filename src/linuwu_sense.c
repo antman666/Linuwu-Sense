@@ -3247,7 +3247,7 @@ predator_usb_charging_show (struct device *dev, struct device_attribute *attr,
             return -ENODEV;
         }
     pr_info ("usb charging get status: %llu\n", result);
-    return sprintf (buf, "%d\n",
+    return sysfs_emit(buf, "%d\n",
                     result == 663296    ? 0
                     : result == 659200  ? 10
                     : result == 1314560 ? 20
@@ -3438,7 +3438,7 @@ predator_battery_limit_show (struct device *dev, struct device_attribute *attr,
     if (ACPI_FAILURE (status))
         return -ENODEV;
 
-    return sprintf (buf, "%d\n", enabled);
+    return sysfs_emit (buf, "%d\n", enabled);
 }
 
 static ssize_t
@@ -3470,7 +3470,7 @@ predator_battery_calibration_show (struct device *dev,
     if (ACPI_FAILURE (status))
         return -ENODEV;
 
-    return sprintf (buf, "%d\n", enabled);
+    return sysfs_emit (buf, "%d\n", enabled);
 }
 
 static ssize_t
@@ -3648,7 +3648,7 @@ static ssize_t
 predator_fan_speed_show (struct device *dev, struct device_attribute *attr,
                          char *buf)
 {
-    return sprintf (buf, "%d,%d\n", cpu_fan_speed, gpu_fan_speed);
+    return sysfs_emit (buf, "%d,%d\n", cpu_fan_speed, gpu_fan_speed);
 }
 
 static ssize_t
@@ -3909,7 +3909,7 @@ predator_lcd_override_show (struct device *dev, struct device_attribute *attr,
             return -ENODEV;
         }
     pr_info ("lcd override get status: %llu\n", result);
-    return sprintf (buf, "%d\n",
+    return sysfs_emit (buf, "%d\n",
                     result == 0x1000001000000 ? 1
                     : result == 0x1000000     ? 0
                                               : -1);
@@ -3959,7 +3959,7 @@ predator_backlight_timeout_show (struct device *dev,
             return -ENODEV;
         }
     pr_info ("backlight_timeout get status: %llu\n", result);
-    return sprintf (buf, "%d\n",
+    return sysfs_emit (buf, "%d\n",
                     result == 0x1E0000080000 ? 1
                     : result == 0x80000      ? 0
                                              : -1);
@@ -4008,7 +4008,7 @@ predator_boot_animation_sound_show (struct device *dev,
             return -ENODEV;
         }
     pr_info ("boot_animation_sound get status: %llu\n", result);
-    return sprintf (buf, "%d\n", result == 0x100 ? 1 : result == 0 ? 0 : -1);
+    return sysfs_emit (buf, "%d\n", result == 0x100 ? 1 : result == 0 ? 0 : -1);
 }
 
 static ssize_t
@@ -4207,7 +4207,7 @@ four_zoned_rgb_kb_show (struct device *dev, struct device_attribute *attr,
                     acpi_format_exception (status));
             return -ENODEV;
         }
-    return sprintf (buf, "%d,%d,%d,%d,%d,%d,%d\n", output.gmOutput[0],
+    return sysfs_emit (buf, "%d,%d,%d,%d,%d,%d,%d\n", output.gmOutput[0],
                     output.gmOutput[1], output.gmOutput[2], output.gmOutput[4],
                     output.gmOutput[5], output.gmOutput[6],
                     output.gmOutput[7]);
@@ -4420,7 +4420,7 @@ per_zoned_rgb_kb_show (struct device *dev, struct device_attribute *attr,
         {
             return -ENODEV;
         }
-    return sprintf (buf, "%06llx,%06llx,%06llx,%06llx,%d\n", output.zone1,
+    return sysfs_emit (buf, "%06llx,%06llx,%06llx,%06llx,%d\n", output.zone1,
                     output.zone2, output.zone3, output.zone4,
                     output.brightness);
 }
