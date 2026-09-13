@@ -1817,7 +1817,11 @@ WMI_gaming_execute_u32_u64 (u32 method_id, u32 in, u64 *out)
         return -EIO;
 
     obj = result.pointer;
-    if (obj && out)
+    if (!obj)
+        {
+            ret = -ENOMSG;
+        }
+    else if (out)
         {
             switch (obj->type)
                 {
@@ -2183,7 +2187,7 @@ acer_gsensor_init (void)
     output.pointer = &out_obj;
     status = acpi_evaluate_object (gsensor_handle, "_INI", NULL, &output);
     if (ACPI_FAILURE (status))
-        return -1;
+        return -EIO;
 
     return 0;
 }
@@ -2202,17 +2206,17 @@ acer_gsensor_event (void)
     union acpi_object out_obj[5];
 
     if (!acer_wmi_accel_dev)
-        return -1;
+        return -ENODEV;
 
     output.length = sizeof (out_obj);
     output.pointer = out_obj;
 
     status = acpi_evaluate_object (gsensor_handle, "RDVL", NULL, &output);
     if (ACPI_FAILURE (status))
-        return -1;
+        return -EIO;
 
     if (out_obj->package.count != 4)
-        return -1;
+        return -EIO;
 
     input_report_abs (acer_wmi_accel_dev, ABS_X,
                       (s16)out_obj->package.elements[0].integer.value);
@@ -2258,7 +2262,7 @@ acer_toggle_turbo (void)
     /* Get current state from turbo button */
     if (ACPI_FAILURE (
             WMID_gaming_get_u64 (&turbo_led_state, ACER_CAP_TURBO_LED)))
-        return -1;
+        return -EIO;
 
     if (turbo_led_state)
         {
@@ -2654,10 +2658,26 @@ acer_kbd_dock_get_initial_state (void)
         }
 
     obj = output_buf.pointer;
-    if (!obj || obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 8)
+    if (!obj)
         {
-            pr_err ("Unexpected output format getting keyboard-dock initial "
+            pr_err ("Unexpected NULL output getting keyboard-dock initial "
                     "status\n");
+            goto out_free_obj;
+        }
+
+    if (obj->type != ACPI_TYPE_BUFFER)
+        {
+            pr_err ("Unexpected output type getting keyboard-dock initial "
+                    "status: %u\n",
+                    obj->type);
+            goto out_free_obj;
+        }
+
+    if (obj->buffer.length != 8)
+        {
+            pr_err ("Unexpected output length getting keyboard-dock initial "
+                    "status: %u\n",
+                    obj->buffer.length);
             goto out_free_obj;
         }
 
@@ -3753,7 +3773,7 @@ acer_predator_state_update (int value)
             tp = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
             break;
         default:
-            return -1;
+            return -EOPNOTSUPP;
         }
     /* When AC is connected */
     if (value == 1)
@@ -3772,7 +3792,7 @@ acer_predator_state_update (int value)
     else
         {
             pr_err ("invalid value received: %d\n", value);
-            return -1;
+            return -EINVAL;
         }
     return 0;
 }
@@ -3838,7 +3858,7 @@ acer_predator_state_load (void)
     if (ACPI_FAILURE (status))
         {
             pr_err ("Failed to query power source state\n");
-            return -1;
+            return -EIO;
         }
 
     /* Restore state based on power source (0 for battery, 1 for AC) */
@@ -3846,7 +3866,7 @@ acer_predator_state_load (void)
     if (ACPI_FAILURE (status))
         {
             pr_err ("Failed to restore thermal state\n");
-            return -1;
+            return -EIO;
         }
 
     pr_info ("Thermal states restored successfully\n");
@@ -3860,19 +3880,18 @@ acer_predator_state_save (void)
     acpi_status status;
     struct file *file;
     ssize_t len;
+    int err;
 
     status = WMI_gaming_execute_u64 (ACER_WMID_GET_GAMING_SYS_INFO_METHODID,
                                      ACER_WMID_CMD_GET_PREDATOR_V4_BAT_STATUS,
                                      &on_AC);
     if (ACPI_FAILURE (status))
-        return -1;
+        return -EIO;
 
     /* update to the latest state based on power source */
-    status = acer_predator_state_update (on_AC == 0 ? 0 : 1);
-    if (ACPI_FAILURE (status))
-        {
-            return -1;
-        }
+    err = acer_predator_state_update (on_AC == 0 ? 0 : 1);
+    if (err)
+        return err;
 
     file = filp_open (STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
     if (IS_ERR (file))
@@ -3886,7 +3905,6 @@ acer_predator_state_save (void)
     if (len < 0)
         {
             pr_info ("state_access - Error writing to file: %ld\n", len);
-            filp_close (file, NULL);
         }
 
     filp_close (file, NULL);
@@ -3894,7 +3912,7 @@ acer_predator_state_save (void)
     if (len != sizeof (current_states))
         {
             pr_err ("Failed to write complete state to file\n");
-            return -1;
+            return -EIO;
         }
 
     pr_info ("Thermal states saved successfully\n");
@@ -4508,7 +4526,7 @@ four_zone_kb_state_update (void)
     if (ACPI_FAILURE (status))
         {
             pr_err ("get kb status failed!");
-            return -1;
+            return -EIO;
         }
 
     current_kb_state.mode = out.gmOutput[0];
@@ -4524,7 +4542,7 @@ four_zone_kb_state_update (void)
     if (ACPI_FAILURE (status))
         {
             pr_err ("get_per_zone_color failed!");
-            return -1;
+            return -EIO;
         }
     return 0;
 }
@@ -4549,7 +4567,6 @@ four_zone_kb_state_save (void)
     if (len < 0)
         {
             pr_err ("kb_state_access - Error writing to file: %ld\n", len);
-            filp_close (file, NULL);
         }
 
     filp_close (file, NULL);
@@ -4557,7 +4574,7 @@ four_zone_kb_state_save (void)
     if (len != sizeof (current_kb_state))
         {
             pr_err ("Failed to write complete state to file\n");
-            return -1;
+            return -EIO;
         }
 
     pr_info ("kb states saved successfully\n");
@@ -4582,7 +4599,7 @@ four_zone_kb_state_load (void)
             if (len != sizeof (current_kb_state))
                 {
                     pr_err ("Incomplete state read\n");
-                    return -1;
+                    return -EIO;
                 }
             else
                 {
@@ -4592,7 +4609,7 @@ four_zone_kb_state_load (void)
     else
         {
             pr_info ("KB state file not found!\n");
-            return -1;
+            return -ENOENT;
         }
 
     if (current_kb_state.per_zone)
@@ -4601,7 +4618,7 @@ four_zone_kb_state_load (void)
             if (ACPI_FAILURE (status))
                 {
                     pr_err ("Error setting RGB KB status.\n");
-                    return -1;
+                    return -EIO;
                 }
         }
     else
@@ -4614,7 +4631,7 @@ four_zone_kb_state_load (void)
             if (ACPI_FAILURE (status))
                 {
                     pr_err ("Error setting KB status.\n");
-                    return -1;
+                    return -EIO;
                 }
         }
 
