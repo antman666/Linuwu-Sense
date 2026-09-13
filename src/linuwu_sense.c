@@ -3262,7 +3262,7 @@ predator_usb_charging_store (struct device *dev, struct device_attribute *attr,
     acpi_status status;
     u64 result;
     u8 val;
-    if (sscanf (buf, "%hhd", &val) != 1)
+    if (kstrtou8 (buf, 10, &val))
         return -EINVAL;
     if ((val != 0) && (val != 10) && (val != 20) && (val != 30))
         return -EINVAL;
@@ -3447,7 +3447,7 @@ predator_battery_limit_store (struct device *dev,
                               size_t count)
 {
     u8 val;
-    if (sscanf (buf, "%hhd", &val) != 1)
+    if (kstrtou8 (buf, 10, &val))
         return -EINVAL;
 
     if ((val != 0) && (val != 1))
@@ -3479,7 +3479,7 @@ preadtor_battery_calibration_store (struct device *dev,
                                     const char *buf, size_t count)
 {
     u8 val;
-    if (sscanf (buf, "%hhd", &val) != 1)
+    if (kstrtou8 (buf, 10, &val))
         return -EINVAL;
 
     if ((val != 0) && (val != 1))
@@ -3922,7 +3922,7 @@ predator_lcd_override_store (struct device *dev, struct device_attribute *attr,
     acpi_status status;
     u64 result;
     u8 val;
-    if (sscanf (buf, "%hhd", &val) != 1)
+    if (kstrtou8 (buf, 10, &val))
         return -EINVAL;
     if ((val != 0) && (val != 1))
         return -EINVAL;
@@ -3973,7 +3973,7 @@ predator_backlight_timeout_store (struct device *dev,
     acpi_status status;
     u64 result;
     u8 val;
-    if (sscanf (buf, "%hhd", &val) != 1)
+    if (kstrtou8 (buf, 10, &val))
         return -EINVAL;
     if ((val != 0) && (val != 1))
         return -EINVAL;
@@ -4022,7 +4022,7 @@ predator_boot_animation_sound_store (struct device *dev,
     acpi_status status;
     u64 result;
     u8 val;
-    if (sscanf (buf, "%hhd", &val) != 1)
+    if (kstrtou8 (buf, 10, &val))
         return -EINVAL;
     if ((val != 0) && (val != 1))
         return -EINVAL;
