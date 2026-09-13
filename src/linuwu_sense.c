@@ -3341,7 +3341,13 @@ battery_health_query (int mode, int *enabled)
 
     obj = output.pointer;
 
-    if (!obj || obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 8)
+    if (!obj)
+        {
+            pr_err ("Unexpected NULL output getting battery health status\n");
+            goto failed;
+        }
+
+    if (obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 8)
         {
             pr_err ("Unexpected output format getting battery health status, "
                     "buffer "
@@ -3402,7 +3408,13 @@ battery_health_set (u8 function, u8 function_status)
 
     obj = output.pointer;
 
-    if (!obj || obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 4)
+    if (!obj)
+        {
+            pr_err ("Unexpected NULL output setting battery health status\n");
+            goto failed;
+        }
+
+    if (obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 4)
         {
             pr_err ("Unexpected output format getting battery health status, "
                     "buffer "
@@ -3660,17 +3672,14 @@ predator_fan_speed_store (struct device *dev, struct device_attribute *attr,
     char input[9];
     char *token;
     char *input_ptr = input;
-    size_t len = min (count, sizeof (input) - 1);
-    strncpy (input, buf, len);
+    ssize_t len;
 
-    if (input[len - 1] == '\n')
-        {
-            input[len - 1] = '\0';
-        }
-    else
-        {
-            input[len] = '\0';
-        }
+    len = strscpy (input, buf, sizeof (input));
+    if (len < 0)
+        return len;
+
+    if (len > 0 && input[len - 1] == '\n')
+        input[len - 1] = '\0';
 
     token = strsep (&input_ptr, ",");
     if (!token || kstrtoint (token, 10, &t_cpu_fan_speed)
@@ -3865,10 +3874,10 @@ acer_predator_state_save (void)
         }
 
     file = filp_open (STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (!file)
+    if (IS_ERR (file))
         {
             pr_info ("state_access - Error opening file\n");
-            return -1;
+            return PTR_ERR (file);
         }
 
     len = kernel_write (file, (char *)&current_states, sizeof (current_states),
@@ -4155,7 +4164,13 @@ get_kb_status (struct get_four_zoned_kb_output *out)
 
     obj = output.pointer;
 
-    if (!obj || obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 16)
+    if (!obj)
+        {
+            pr_err ("Unexpected NULL output getting kb zone status\n");
+            goto failed;
+        }
+
+    if (obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 16)
         {
             pr_err ("Unexpected output format getting kb zone status, buffer "
                     "length:%d\n",
@@ -4226,18 +4241,14 @@ four_zoned_rgb_kb_store (struct device *dev, struct device_attribute *attr,
     char input_buf[30];
     char *token;
     char *input_ptr = input_buf;
-    size_t len = min (count, sizeof (input_buf) - 1);
+    ssize_t len;
 
-    strncpy (input_buf, buf, len);
+    len = strscpy (input_buf, buf, sizeof (input_buf));
+    if (len < 0)
+        return len;
 
-    if (input_buf[len - 1] == '\n')
-        {
-            input_buf[len - 1] = '\0';
-        }
-    else
-        {
-            input_buf[len] = '\0';
-        }
+    if (len > 0 && input_buf[len - 1] == '\n')
+        input_buf[len - 1] = '\0';
 
     token = strsep (&input_ptr, ",");
     if (!token || kstrtoint (token, 10, &mode) || mode < 0 || mode > 7)
@@ -4433,21 +4444,18 @@ per_zoned_rgb_kb_store (struct device *dev, struct device_attribute *attr,
                         const char *buf, size_t count)
 {
     int i = 0;
-    size_t len;
+    ssize_t len;
     char *token;
     char str_buf[34];
     struct per_zone_color colors;
     char *input_ptr = str_buf;
-    len = min (count, sizeof (str_buf) - 1);
-    strncpy (str_buf, buf, len);
-    if (str_buf[len - 1] == '\n')
-        {
-            str_buf[len - 1] = '\0';
-        }
-    else
-        {
-            str_buf[len] = '\0';
-        }
+
+    len = strscpy (str_buf, buf, sizeof (str_buf));
+    if (len < 0)
+        return len;
+
+    if (len > 0 && str_buf[len - 1] == '\n')
+        str_buf[len - 1] = '\0';
 
     acpi_status status;
 
@@ -4529,10 +4537,10 @@ four_zone_kb_state_save (void)
     four_zone_kb_state_update ();
 
     file = filp_open (KB_STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (!file)
+    if (IS_ERR (file))
         {
             pr_err ("kb_state_access - Error opening file\n");
-            return -1;
+            return PTR_ERR (file);
         }
 
     len = kernel_write (file, (char *)&current_kb_state,
@@ -4733,7 +4741,7 @@ acer_platform_remove (struct platform_device *device)
         }
     if (has_cap (ACER_CAP_NITRO_SENSE))
         {
-            sysfs_remove_group (&device->dev.kobj, &nitro_sense_v4_attr_group);
+            sysfs_remove_group (&device->dev.kobj, &nitro_sense_attr_group);
             acer_predator_state_save ();
         }
     if (has_cap (ACER_CAP_NITRO_SENSE_V4))
