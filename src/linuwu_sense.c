@@ -4697,7 +4697,7 @@ acer_platform_probe (struct platform_device *device)
             err = sysfs_create_group (&device->dev.kobj,
                                       &nitro_sense_v4_attr_group);
             if (err)
-                goto error_predator_sense;
+                goto error_nitro_sense_v4;
             acer_predator_state_load ();
         }
     if (has_cap (ACER_CAP_NITRO_SENSE))
@@ -4727,6 +4727,18 @@ acer_platform_probe (struct platform_device *device)
     return 0;
 
 error_hwmon:
+    if (quirks->four_zone_kb)
+        sysfs_remove_group (&device->dev.kobj, &four_zoned_kb_attr_group);
+error_four_zone:
+    if (has_cap (ACER_CAP_NITRO_SENSE))
+        sysfs_remove_group (&device->dev.kobj, &nitro_sense_attr_group);
+error_nitro_sense:
+    if (has_cap (ACER_CAP_NITRO_SENSE_V4))
+        sysfs_remove_group (&device->dev.kobj, &nitro_sense_v4_attr_group);
+error_nitro_sense_v4:
+    if (has_cap (ACER_CAP_PREDATOR_SENSE))
+        sysfs_remove_group (&device->dev.kobj, &preadtor_sense_attr_group);
+error_predator_sense:
 error_platform_profile:
     acer_rfkill_exit ();
 error_rfkill:
@@ -4735,12 +4747,6 @@ error_rfkill:
 error_brightness:
     if (has_cap (ACER_CAP_MAILLED))
         acer_led_exit ();
-error_four_zone:
-    return err;
-error_nitro_sense:
-    return err;
-error_predator_sense:
-    return err;
 error_mailled:
     return err;
 }
