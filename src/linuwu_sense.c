@@ -18,6 +18,7 @@
 #include <linux/bitmap.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
+#include <linux/device.h>
 #include <linux/dmi.h>
 #include <linux/fs.h>
 #include <linux/hwmon.h>
