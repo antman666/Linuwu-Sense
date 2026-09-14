@@ -1852,7 +1852,7 @@ static int WMID_gaming_get_sys_info(u32 command, u64 *out)
 	return 0;
 }
 
-static void WMID_gaming_set_fan_mode(u8 fan_mode)
+static acpi_status WMID_gaming_set_fan_mode(u8 fan_mode)
 {
 	/* fan_mode = 1 is used for auto, fan_mode = 2 used for turbo*/
 	u64 gpu_fan_config1 = 0, gpu_fan_config2 = 0;
@@ -1870,8 +1870,8 @@ static void WMID_gaming_set_fan_mode(u8 fan_mode)
 		gpu_fan_config1 |= fan_mode << (2 * i + 2);
 	for (i = 0; i < quirks->gpu_fans; ++i)
 		gpu_fan_config1 |= fan_mode << (2 * i + 6);
-	WMID_gaming_set_u64(gpu_fan_config2 | gpu_fan_config1 << 16,
-			    ACER_CAP_TURBO_FAN);
+	return WMID_gaming_set_u64(gpu_fan_config2 | gpu_fan_config1 << 16,
+				   ACER_CAP_TURBO_FAN);
 }
 
 static int
@@ -2056,8 +2056,11 @@ static int read_brightness(struct backlight_device *bd)
 static int update_bl_status(struct backlight_device *bd)
 {
 	int intensity = backlight_get_brightness(bd);
+	acpi_status status;
 
-	set_u32(intensity, ACER_CAP_BRIGHTNESS);
+	status = set_u32(intensity, ACER_CAP_BRIGHTNESS);
+	if (ACPI_FAILURE(status))
+		return -EIO;
 
 	return 0;
 }
@@ -2196,6 +2199,8 @@ static acpi_status acer_set_fan_speed(int t_cpu_fan_speed, int t_gpu_fan_speed);
 static int acer_toggle_turbo(void)
 {
 	u64 turbo_led_state;
+	acpi_status status;
+	int err;
 
 	/* Get current state from turbo button */
 	if (ACPI_FAILURE(
@@ -2204,38 +2209,60 @@ static int acer_toggle_turbo(void)
 
 	if (turbo_led_state) {
 		/* Turn off turbo led */
-		WMID_gaming_set_u64(0x1, ACER_CAP_TURBO_LED);
+		status = WMID_gaming_set_u64(0x1, ACER_CAP_TURBO_LED);
+		if (ACPI_FAILURE(status))
+			goto failed;
 
 		/* Set FAN mode to auto */
-		WMID_gaming_set_fan_mode(0x1);
+		status = WMID_gaming_set_fan_mode(0x1);
+		if (ACPI_FAILURE(status))
+			goto failed;
 
 		/* Set OC to normal */
 		if (has_cap(ACER_CAP_TURBO_OC)) {
-			WMID_gaming_set_misc_setting(
+			err = WMID_gaming_set_misc_setting(
 				ACER_WMID_MISC_SETTING_OC_1,
 				ACER_WMID_OC_NORMAL);
-			WMID_gaming_set_misc_setting(
+			if (err)
+				goto failed;
+
+			err = WMID_gaming_set_misc_setting(
 				ACER_WMID_MISC_SETTING_OC_2,
 				ACER_WMID_OC_NORMAL);
+			if (err)
+				goto failed;
 		}
 	} else {
 		/* Turn on turbo led */
-		WMID_gaming_set_u64(0x10001, ACER_CAP_TURBO_LED);
+		status = WMID_gaming_set_u64(0x10001, ACER_CAP_TURBO_LED);
+		if (ACPI_FAILURE(status))
+			goto failed;
 
 		/* Set FAN mode to turbo */
-		WMID_gaming_set_fan_mode(0x2);
+		status = WMID_gaming_set_fan_mode(0x2);
+		if (ACPI_FAILURE(status))
+			goto failed;
 
 		/* Set OC to turbo mode */
 		if (has_cap(ACER_CAP_TURBO_OC)) {
-			WMID_gaming_set_misc_setting(
+			err = WMID_gaming_set_misc_setting(
 				ACER_WMID_MISC_SETTING_OC_1,
 				ACER_WMID_OC_TURBO);
-			WMID_gaming_set_misc_setting(
+			if (err)
+				goto failed;
+
+			err = WMID_gaming_set_misc_setting(
 				ACER_WMID_MISC_SETTING_OC_2,
 				ACER_WMID_OC_TURBO);
+			if (err)
+				goto failed;
 		}
 	}
 	return turbo_led_state;
+
+failed:
+	pr_err("Failed to toggle turbo mode; partial firmware state may remain\n");
+	return -EIO;
 }
 
 static int
@@ -4461,7 +4488,6 @@ static int four_zone_kb_state_load(void)
 			err = -EIO;
 			goto out;
 		} else {
-			current_kb_state = state;
 			pr_info("KB states loaded\n");
 		}
 	} else {
@@ -4470,8 +4496,10 @@ static int four_zone_kb_state_load(void)
 		goto out;
 	}
 
-	if (current_kb_state.per_zone) {
-		status = set_per_zone_color(&current_kb_state.zones);
+	if (state.per_zone) {
+		struct per_zone_color zones = state.zones;
+
+		status = set_per_zone_color(&zones);
 		if (ACPI_FAILURE(status)) {
 			pr_err("Error setting RGB KB status.\n");
 			err = -EIO;
@@ -4479,16 +4507,16 @@ static int four_zone_kb_state_load(void)
 		}
 	} else {
 		status = set_kb_status(
-			current_kb_state.mode, current_kb_state.speed,
-			current_kb_state.brightness, current_kb_state.direction,
-			current_kb_state.red, current_kb_state.green,
-			current_kb_state.blue);
+			state.mode, state.speed, state.brightness,
+			state.direction, state.red, state.green, state.blue);
 		if (ACPI_FAILURE(status)) {
 			pr_err("Error setting KB status.\n");
 			err = -EIO;
 			goto out;
 		}
 	}
+
+	current_kb_state = state;
 
 	pr_info("KB states restored successfully\n");
 	err = 0;
@@ -4723,8 +4751,14 @@ static int acer_resume(struct device *dev)
 		}
 	}
 
-	if (acer_wmi_accel_dev)
-		acer_gsensor_init();
+	if (acer_wmi_accel_dev) {
+		int err = acer_gsensor_init();
+
+		if (err) {
+			pr_err("Error initializing accelerometer: %d\n", err);
+			return err;
+		}
+	}
 
 	return 0;
 }
