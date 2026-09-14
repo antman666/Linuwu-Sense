@@ -4373,6 +4373,7 @@ static int four_zone_kb_state_update(void)
 {
 	acpi_status status;
 	struct get_four_zoned_kb_output out;
+	struct kb_state state = current_kb_state;
 
 	// Get keyboard status
 	status = get_kb_status(&out);
@@ -4381,20 +4382,23 @@ static int four_zone_kb_state_update(void)
 		return -EIO;
 	}
 
-	current_kb_state.mode = out.gmOutput[0];
-	current_kb_state.speed = out.gmOutput[1];
-	current_kb_state.brightness = out.gmOutput[2];
-	current_kb_state.direction = out.gmOutput[4];
-	current_kb_state.red = out.gmOutput[5];
-	current_kb_state.green = out.gmOutput[6];
-	current_kb_state.blue = out.gmOutput[7];
+	state.mode = out.gmOutput[0];
+	state.speed = out.gmOutput[1];
+	state.brightness = out.gmOutput[2];
+	state.direction = out.gmOutput[4];
+	state.red = out.gmOutput[5];
+	state.green = out.gmOutput[6];
+	state.blue = out.gmOutput[7];
 
 	// Get per-zone color data
-	status = get_per_zone_color(&current_kb_state.zones);
+	status = get_per_zone_color(&state.zones);
 	if (ACPI_FAILURE(status)) {
 		pr_err("get_per_zone_color failed!");
 		return -EIO;
 	}
+
+	current_kb_state = state;
+
 	return 0;
 }
 
@@ -4442,20 +4446,22 @@ static int four_zone_kb_state_load(void)
 	ssize_t len;
 	acpi_status status;
 	int err;
+	struct kb_state state;
 
 	mutex_lock(&acer_state_lock);
 
 	file = filp_open(KB_STATE_FILE, O_RDONLY, 0);
 	if (!IS_ERR(file)) {
-		len = kernel_read(file, (char *)&current_kb_state,
-				  sizeof(current_kb_state), &file->f_pos);
+		len = kernel_read(file, (char *)&state, sizeof(state),
+				  &file->f_pos);
 		filp_close(file, NULL);
 
-		if (len != sizeof(current_kb_state)) {
+		if (len != sizeof(state)) {
 			pr_err("Incomplete state read\n");
 			err = -EIO;
 			goto out;
 		} else {
+			current_kb_state = state;
 			pr_info("KB states loaded\n");
 		}
 	} else {
