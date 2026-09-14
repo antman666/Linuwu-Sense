@@ -1168,7 +1168,9 @@ AMW0_set_u32 (u32 value, u32 cap)
             switch (quirks->brightness)
                 {
                 default:
-                    return ec_write (0x83, value);
+                    if (ec_write (0x83, value))
+                        return AE_ERROR;
+                    return AE_OK;
                 }
         default:
             return AE_ERROR;
@@ -1344,23 +1346,37 @@ WMI_execute_u32 (u32 method_id, u32 in, u32 *out)
         return status;
 
     obj = (union acpi_object *)result.pointer;
-    if (obj)
+    if (!obj)
         {
-            if (obj->type == ACPI_TYPE_BUFFER
-                && (obj->buffer.length == sizeof (u32)
-                    || obj->buffer.length == sizeof (u64)))
+            status = AE_ERROR;
+            goto out_free;
+        }
+
+    if (obj->type == ACPI_TYPE_BUFFER)
+        {
+            if (obj->buffer.length == sizeof (u32)
+                || obj->buffer.length == sizeof (u64))
+                tmp = *((u32 *)obj->buffer.pointer);
+            else
                 {
-                    tmp = *((u32 *)obj->buffer.pointer);
+                    status = AE_ERROR;
+                    goto out_free;
                 }
-            else if (obj->type == ACPI_TYPE_INTEGER)
-                {
-                    tmp = (u32)obj->integer.value;
-                }
+        }
+    else if (obj->type == ACPI_TYPE_INTEGER)
+        {
+            tmp = (u32)obj->integer.value;
+        }
+    else
+        {
+            status = AE_ERROR;
+            goto out_free;
         }
 
     if (out)
         *out = tmp;
 
+out_free:
     kfree (result.pointer);
 
     return status;
@@ -1598,7 +1614,11 @@ wmid3_set_device_status (u32 value, u16 device)
             return AE_ERROR;
         }
 
-    return_value = *((struct wmid3_gds_return_value *)obj->buffer.pointer);
+    return_value.error_code
+        = ((struct wmid3_gds_return_value *)obj->buffer.pointer)->error_code;
+    return_value.ec_return_value
+        = ((struct wmid3_gds_return_value *)obj->buffer.pointer)
+              ->ec_return_value;
     kfree (obj);
 
     if (return_value.error_code || return_value.ec_return_value)
@@ -1736,24 +1756,38 @@ WMI_apgeaction_execute_u64 (u32 method_id, u64 in, u64 *out)
         return status;
     obj = (union acpi_object *)result.pointer;
 
-    if (obj)
+    if (!obj)
         {
-            if (obj->type == ACPI_TYPE_BUFFER)
+            status = AE_ERROR;
+            goto out_free;
+        }
+
+    if (obj->type == ACPI_TYPE_BUFFER)
+        {
+            if (obj->buffer.length == sizeof (u32))
+                tmp = *((u32 *)obj->buffer.pointer);
+            else if (obj->buffer.length == sizeof (u64))
+                tmp = *((u64 *)obj->buffer.pointer);
+            else
                 {
-                    if (obj->buffer.length == sizeof (u32))
-                        tmp = *((u32 *)obj->buffer.pointer);
-                    else if (obj->buffer.length == sizeof (u64))
-                        tmp = *((u64 *)obj->buffer.pointer);
+                    status = AE_ERROR;
+                    goto out_free;
                 }
-            else if (obj->type == ACPI_TYPE_INTEGER)
-                {
-                    tmp = (u64)obj->integer.value;
-                }
+        }
+    else if (obj->type == ACPI_TYPE_INTEGER)
+        {
+            tmp = (u64)obj->integer.value;
+        }
+    else
+        {
+            status = AE_ERROR;
+            goto out_free;
         }
 
     if (out)
         *out = tmp;
 
+out_free:
     kfree (result.pointer);
 
     return status;
@@ -1777,24 +1811,38 @@ WMI_gaming_execute_u64 (u32 method_id, u64 in, u64 *out)
         return status;
     obj = (union acpi_object *)result.pointer;
 
-    if (obj)
+    if (!obj)
         {
-            if (obj->type == ACPI_TYPE_BUFFER)
+            status = AE_ERROR;
+            goto out_free;
+        }
+
+    if (obj->type == ACPI_TYPE_BUFFER)
+        {
+            if (obj->buffer.length == sizeof (u32))
+                tmp = *((u32 *)obj->buffer.pointer);
+            else if (obj->buffer.length == sizeof (u64))
+                tmp = *((u64 *)obj->buffer.pointer);
+            else
                 {
-                    if (obj->buffer.length == sizeof (u32))
-                        tmp = *((u32 *)obj->buffer.pointer);
-                    else if (obj->buffer.length == sizeof (u64))
-                        tmp = *((u64 *)obj->buffer.pointer);
+                    status = AE_ERROR;
+                    goto out_free;
                 }
-            else if (obj->type == ACPI_TYPE_INTEGER)
-                {
-                    tmp = (u64)obj->integer.value;
-                }
+        }
+    else if (obj->type == ACPI_TYPE_INTEGER)
+        {
+            tmp = (u64)obj->integer.value;
+        }
+    else
+        {
+            status = AE_ERROR;
+            goto out_free;
         }
 
     if (out)
         *out = tmp;
 
+out_free:
     kfree (result.pointer);
 
     return status;
@@ -2215,7 +2263,15 @@ acer_gsensor_event (void)
     if (ACPI_FAILURE (status))
         return -EIO;
 
+    if (out_obj->type != ACPI_TYPE_PACKAGE)
+        return -EIO;
+
     if (out_obj->package.count != 4)
+        return -EIO;
+
+    if (out_obj->package.elements[0].type != ACPI_TYPE_INTEGER
+        || out_obj->package.elements[1].type != ACPI_TYPE_INTEGER
+        || out_obj->package.elements[2].type != ACPI_TYPE_INTEGER)
         return -EIO;
 
     input_report_abs (acer_wmi_accel_dev, ABS_X,
@@ -2476,7 +2532,7 @@ acer_predator_v4_platform_profile_probe (void *drvdata, unsigned long *choices)
 
 static int acer_predator_state_update (int value);
 
-static acpi_status acer_predator_state_restore (int value);
+static int acer_predator_state_restore (int value);
 
 static acpi_status battery_health_set (u8 function, u8 function_status);
 
@@ -3368,7 +3424,15 @@ battery_health_query (int mode, int *enabled)
             goto failed;
         }
 
-    if (obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 8)
+    if (obj->type != ACPI_TYPE_BUFFER)
+        {
+            pr_err ("Unexpected output type getting battery health status: "
+                    "%u\n",
+                    obj->type);
+            goto failed;
+        }
+
+    if (obj->buffer.length != 8)
         {
             pr_err ("Unexpected output format getting battery health status, "
                     "buffer "
@@ -3435,7 +3499,15 @@ battery_health_set (u8 function, u8 function_status)
             goto failed;
         }
 
-    if (obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 4)
+    if (obj->type != ACPI_TYPE_BUFFER)
+        {
+            pr_err ("Unexpected output type getting battery health status: "
+                    "%u\n",
+                    obj->type);
+            goto failed;
+        }
+
+    if (obj->buffer.length != 4)
         {
             pr_err ("Unexpected output format getting battery health status, "
                     "buffer "
@@ -3797,7 +3869,7 @@ acer_predator_state_update (int value)
     return 0;
 }
 
-static acpi_status
+static int
 acer_predator_state_restore (int value)
 {
     int err = WMID_gaming_set_misc_setting (
@@ -3814,10 +3886,10 @@ acer_predator_state_restore (int value)
                    : current_states.ac_state.gpu_fan_speed);
     if (ACPI_FAILURE (status))
         {
-            return AE_ERROR;
+            return -EIO;
         }
 
-    return AE_OK;
+    return 0;
 }
 
 static int
@@ -3827,6 +3899,7 @@ acer_predator_state_load (void)
     struct file *file;
     ssize_t len;
     acpi_status status;
+    int err;
 
     file = filp_open (STATE_FILE, O_RDONLY, 0);
     if (!IS_ERR (file))
@@ -3862,11 +3935,11 @@ acer_predator_state_load (void)
         }
 
     /* Restore state based on power source (0 for battery, 1 for AC) */
-    status = acer_predator_state_restore (on_AC == 0 ? 0 : 1);
-    if (ACPI_FAILURE (status))
+    err = acer_predator_state_restore (on_AC == 0 ? 0 : 1);
+    if (err)
         {
             pr_err ("Failed to restore thermal state\n");
-            return -EIO;
+            return err;
         }
 
     pr_info ("Thermal states restored successfully\n");
@@ -4140,28 +4213,41 @@ set_kb_status (int mode, int speed, int brightness, int direction, int red,
 
     obj = (union acpi_object *)output.pointer;
 
-    if (obj)
+    if (!obj)
         {
-            if (obj->type == ACPI_TYPE_BUFFER)
+            status = AE_ERROR;
+            goto out_free;
+        }
+
+    if (obj->type == ACPI_TYPE_BUFFER)
+        {
+            if (obj->buffer.length == sizeof (u32))
+                resp = *((u32 *)obj->buffer.pointer);
+            else if (obj->buffer.length == sizeof (u64))
+                resp = *((u64 *)obj->buffer.pointer);
+            else
                 {
-                    if (obj->buffer.length == sizeof (u32))
-                        resp = *((u32 *)obj->buffer.pointer);
-                    else if (obj->buffer.length == sizeof (u64))
-                        resp = *((u64 *)obj->buffer.pointer);
+                    status = AE_ERROR;
+                    goto out_free;
                 }
-            else if (obj->type == ACPI_TYPE_INTEGER)
-                {
-                    resp = (u64)obj->integer.value;
-                }
+        }
+    else if (obj->type == ACPI_TYPE_INTEGER)
+        {
+            resp = (u64)obj->integer.value;
+        }
+    else
+        {
+            status = AE_ERROR;
+            goto out_free;
         }
 
     if (resp != 0)
         {
             pr_err ("failed to set keyboard rgb: %llu\n", resp);
-            kfree (obj);
-            return AE_ERROR;
+            status = AE_ERROR;
         }
 
+out_free:
     kfree (obj);
     return status;
 }
@@ -4189,7 +4275,14 @@ get_kb_status (struct get_four_zoned_kb_output *out)
             goto failed;
         }
 
-    if (obj->type != ACPI_TYPE_BUFFER || obj->buffer.length != 16)
+    if (obj->type != ACPI_TYPE_BUFFER)
+        {
+            pr_err ("Unexpected output type getting kb zone status: %u\n",
+                    obj->type);
+            goto failed;
+        }
+
+    if (obj->buffer.length != 16)
         {
             pr_err ("Unexpected output format getting kb zone status, buffer "
                     "length:%d\n",
@@ -4420,7 +4513,7 @@ set_per_zone_color (struct per_zone_color *input)
     if (ACPI_FAILURE (status))
         {
             pr_err ("Error setting KB status.\n");
-            return -ENODEV;
+            return status;
         }
 
     for (int i = 0; i < 4; i++)
