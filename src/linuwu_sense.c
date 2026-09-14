@@ -2552,11 +2552,14 @@ acer_platform_profile_setup (struct platform_device *pdev)
         return 0;
     for (int attempt = 1; attempt <= max_retries; attempt++)
         {
-            platform_profile_device = devm_platform_profile_register (
+            struct device *profile_dev;
+
+            profile_dev = devm_platform_profile_register (
                 &pdev->dev, "acer-wmi", NULL,
                 &acer_predator_v4_platform_profile_ops);
-            if (!IS_ERR (platform_profile_device))
+            if (!IS_ERR (profile_dev))
                 {
+                    platform_profile_device = profile_dev;
                     platform_profile_support = true;
                     pr_info ("Platform profile registered successfully "
                              "(attempt %d)\n",
@@ -2565,7 +2568,7 @@ acer_platform_profile_setup (struct platform_device *pdev)
                 }
             pr_warn ("Platform profile registration failed (attempt %d/%d), "
                      "error: %ld\n",
-                     attempt, max_retries, PTR_ERR (platform_profile_device));
+                     attempt, max_retries, PTR_ERR (profile_dev));
             if (attempt < max_retries)
                 {
                     msleep (delay_ms);
@@ -2574,8 +2577,8 @@ acer_platform_profile_setup (struct platform_device *pdev)
         }
     pr_warn ("Platform profile setup failed. Continuing to load without "
              "profile support.\n");
-    platform_profile_support
-        = false; /* Disable platform profile support if unavailable. */
+    platform_profile_device = NULL;
+    platform_profile_support = false;
 
     return 0;
 }
@@ -2666,7 +2669,8 @@ acer_thermal_profile_change (void)
             if (tp != acer_predator_v4_max_perf)
                 last_non_turbo_profile = tp;
 
-            platform_profile_notify (platform_profile_device);
+            if (platform_profile_support)
+                platform_profile_notify (platform_profile_device);
         }
 
     return 0;
@@ -3216,13 +3220,13 @@ acer_wmi_accel_setup (void)
 
 err_free_dev:
     input_free_device (acer_wmi_accel_dev);
+    acer_wmi_accel_dev = NULL;
     return err;
 }
 
 static int __init
 acer_wmi_input_setup (void)
 {
-    acpi_status status;
     int err;
 
     acer_wmi_input_dev = input_allocate_device ();
@@ -3240,25 +3244,15 @@ acer_wmi_input_setup (void)
     if (has_cap (ACER_CAP_KBD_DOCK))
         input_set_capability (acer_wmi_input_dev, EV_SW, SW_TABLET_MODE);
 
-    status = wmi_install_notify_handler (ACERWMID_EVENT_GUID, acer_wmi_notify,
-                                         NULL);
-    if (ACPI_FAILURE (status))
-        {
-            err = -EIO;
-            goto err_free_dev;
-        }
-
     if (has_cap (ACER_CAP_KBD_DOCK))
         acer_kbd_dock_get_initial_state ();
 
     err = input_register_device (acer_wmi_input_dev);
     if (err)
-        goto err_uninstall_notifier;
+        goto err_free_dev;
 
     return 0;
 
-err_uninstall_notifier:
-    wmi_remove_notify_handler (ACERWMID_EVENT_GUID);
 err_free_dev:
     input_free_device (acer_wmi_input_dev);
     return err;
@@ -3267,7 +3261,6 @@ err_free_dev:
 static void
 acer_wmi_input_destroy (void)
 {
-    wmi_remove_notify_handler (ACERWMID_EVENT_GUID);
     input_unregister_device (acer_wmi_input_dev);
 }
 
@@ -4750,6 +4743,7 @@ static struct attribute_group four_zoned_kb_attr_group
 static int
 acer_platform_probe (struct platform_device *device)
 {
+    acpi_status status;
     int err;
 
     if (has_cap (ACER_CAP_MAILLED))
@@ -4817,8 +4811,20 @@ acer_platform_probe (struct platform_device *device)
                 goto error_hwmon;
         }
 
+    if (wmi_has_guid (ACERWMID_EVENT_GUID))
+        {
+            status = wmi_install_notify_handler (ACERWMID_EVENT_GUID,
+                                                  acer_wmi_notify, NULL);
+            if (ACPI_FAILURE (status))
+                {
+                    err = -EIO;
+                    goto error_notifier;
+                }
+        }
+
     return 0;
 
+error_notifier:
 error_hwmon:
     if (quirks->four_zone_kb)
         sysfs_remove_group (&device->dev.kobj, &four_zoned_kb_attr_group);
@@ -4833,6 +4839,8 @@ error_nitro_sense_v4:
         sysfs_remove_group (&device->dev.kobj, &preadtor_sense_attr_group);
 error_predator_sense:
 error_platform_profile:
+    platform_profile_device = NULL;
+    platform_profile_support = false;
     acer_rfkill_exit ();
 error_rfkill:
     if (has_cap (ACER_CAP_BRIGHTNESS))
@@ -4847,6 +4855,9 @@ error_mailled:
 static void
 acer_platform_remove (struct platform_device *device)
 {
+    if (wmi_has_guid (ACERWMID_EVENT_GUID))
+        wmi_remove_notify_handler (ACERWMID_EVENT_GUID);
+
     if (has_cap (ACER_CAP_MAILLED))
         acer_led_exit ();
     if (has_cap (ACER_CAP_BRIGHTNESS))
@@ -4873,6 +4884,9 @@ acer_platform_remove (struct platform_device *device)
         }
 
     acer_rfkill_exit ();
+
+    platform_profile_device = NULL;
+    platform_profile_support = false;
 }
 
 #ifdef CONFIG_PM_SLEEP
@@ -5265,15 +5279,15 @@ error_platform_register:
 static void __exit
 acer_wmi_exit (void)
 {
+    remove_debugfs ();
+    platform_device_unregister (acer_platform_device);
+    platform_driver_unregister (&acer_platform_driver);
+
     if (wmi_has_guid (ACERWMID_EVENT_GUID))
         acer_wmi_input_destroy ();
 
     if (acer_wmi_accel_dev)
         input_unregister_device (acer_wmi_accel_dev);
-
-    remove_debugfs ();
-    platform_device_unregister (acer_platform_device);
-    platform_driver_unregister (&acer_platform_driver);
 
     pr_info ("Acer Laptop WMI Extras unloaded\n");
 }
