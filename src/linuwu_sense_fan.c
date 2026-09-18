@@ -22,8 +22,8 @@ static acpi_status linuwu_sense_fan_invoke(struct wmi_device *wdev,
 	if (!wdev)
 		return AE_ERROR;
 
-	err = wmidev_invoke_method(wdev, 0, method_id, &input_buf,
-				   &output_buf, sizeof(u32));
+	err = wmidev_invoke_method(wdev, 0, method_id, &input_buf, &output_buf,
+				   sizeof(u32));
 	if (err)
 		return AE_ERROR;
 
@@ -33,16 +33,15 @@ static acpi_status linuwu_sense_fan_invoke(struct wmi_device *wdev,
 	return AE_OK;
 }
 
-acpi_status linuwu_sense_fan_set_behavior(struct wmi_device *wdev,
-					   u64 behavior)
+acpi_status linuwu_sense_fan_set_behavior(struct wmi_device *wdev, u64 behavior)
 {
 	return linuwu_sense_fan_invoke(
 		wdev, ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID, behavior);
 }
 
-acpi_status linuwu_sense_fan_set_mode(struct wmi_device *wdev,
-					 u8 cpu_fans, u8 gpu_fans,
-					 enum linuwu_sense_fan_mode fan_mode)
+acpi_status linuwu_sense_fan_set_mode(struct wmi_device *wdev, u8 cpu_fans,
+				      u8 gpu_fans,
+				      enum linuwu_sense_fan_mode fan_mode)
 {
 	u64 fan_config1 = 0;
 	u64 fan_config2 = 0;
@@ -70,8 +69,8 @@ acpi_status linuwu_sense_fan_set_mode(struct wmi_device *wdev,
 	for (i = 0; i < gpu_fans; i++)
 		fan_config1 |= (u64)fan_mode << (2 * i + 6);
 
-	return linuwu_sense_fan_set_behavior(
-		wdev, fan_config2 | (fan_config1 << 16));
+	return linuwu_sense_fan_set_behavior(wdev,
+					     fan_config2 | (fan_config1 << 16));
 }
 
 static u64 linuwu_sense_fan_value(int percentage, int fan_index)
@@ -80,8 +79,8 @@ static u64 linuwu_sense_fan_value(int percentage, int fan_index)
 }
 
 acpi_status linuwu_sense_fan_set_speed(struct wmi_device *wdev,
-					  enum linuwu_sense_fan fan,
-					  int percentage)
+				       enum linuwu_sense_fan fan,
+				       int percentage)
 {
 	int fan_index;
 
