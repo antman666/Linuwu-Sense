@@ -2079,30 +2079,30 @@ static u8 acer_default_thermal_profile(bool on_ac)
 
 static u8 acer_thermal_profile_for_power_transition(bool old_on_ac,
 						  bool new_on_ac,
-						  u8 current)
+						  u8 current_profile)
 {
 	if (old_on_ac && !new_on_ac)
-		return current == ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET ?
+		return current_profile == ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET ?
 		       ACER_PREDATOR_V4_THERMAL_PROFILE_ECO :
 		       ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
 
 	if (!old_on_ac && new_on_ac)
-		return current == ACER_PREDATOR_V4_THERMAL_PROFILE_ECO ?
+		return current_profile == ACER_PREDATOR_V4_THERMAL_PROFILE_ECO ?
 		       ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET :
 		       ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
 
-	return current;
+	return current_profile;
 }
 
-static u8 acer_next_thermal_profile(bool on_ac, u8 current)
+static u8 acer_next_thermal_profile(bool on_ac, u8 current_profile)
 {
 	if (!on_ac) {
-		if (current == ACER_PREDATOR_V4_THERMAL_PROFILE_ECO)
+		if (current_profile == ACER_PREDATOR_V4_THERMAL_PROFILE_ECO)
 			return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
 		return ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
 	}
 
-	switch (current) {
+	switch (current_profile) {
 	case ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET:
 		return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
 	case ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED:
