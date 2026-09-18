@@ -41,6 +41,8 @@
 #include <linux/wmi.h>
 #include <linux/workqueue.h>
 
+#include "linuwu_sense_fan.h"
+
 MODULE_AUTHOR("Carlos Corbacho");
 MODULE_DESCRIPTION("Acer Laptop WMI Extras Driver");
 MODULE_LICENSE("GPL");
@@ -75,11 +77,7 @@ MODULE_LICENSE("GPL");
 
 #define ACER_WMID_GET_GAMING_PROFILE_METHODID 3
 #define ACER_WMID_SET_GAMING_PROFILE_METHODID 1
-#define ACER_WMID_SET_GAMING_LED_METHODID 2
-#define ACER_WMID_GET_GAMING_LED_METHODID 4
 #define ACER_WMID_GET_GAMING_SYS_INFO_METHODID 5
-#define ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID 14
-#define ACER_WMID_SET_GAMING_FAN_SPEED_METHODID 16
 #define ACER_WMID_SET_GAMING_MISC_SETTING_METHODID 22
 #define ACER_WMID_GET_GAMING_MISC_SETTING_METHODID 23
 #define ACER_WMID_GET_BATTERY_HEALTH_CONTROL_STATUS_METHODID 20
@@ -110,10 +108,6 @@ MODULE_LICENSE("GPL");
 #define WMID_GUID4 "7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56"
 #define WMID_GUID5 "79772EC5-04B1-4bfd-843C-61E7F77B6CC9"
 
-/*
- * Predator State
- */
-#define STATE_FILE "/etc/predator_state"
 #define KB_STATE_FILE "/etc/four_zone_kb_state"
 /*
  * Acer ACPI event GUIDs
@@ -147,14 +141,7 @@ enum acer_wmi_predator_v4_sensor_id {
 	ACER_WMID_SENSOR_GPU_TEMPERATURE = 0x0A,
 };
 
-enum acer_wmi_predator_v4_oc {
-	ACER_WMID_OC_NORMAL = 0x0000,
-	ACER_WMID_OC_TURBO = 0x0002,
-};
-
 enum acer_wmi_gaming_misc_setting {
-	ACER_WMID_MISC_SETTING_OC_1 = 0x0005,
-	ACER_WMID_MISC_SETTING_OC_2 = 0x0007,
 	ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES = 0x000A,
 	ACER_WMID_MISC_SETTING_PLATFORM_PROFILE = 0x000B,
 };
@@ -296,8 +283,6 @@ struct hotkey_function_type_aa {
 #define ACER_CAP_THREEG BIT(4)
 #define ACER_CAP_SET_FUNCTION_MODE BIT(5)
 #define ACER_CAP_KBD_DOCK BIT(6)
-#define ACER_CAP_TURBO_OC BIT(7)
-#define ACER_CAP_TURBO_LED BIT(8)
 #define ACER_CAP_TURBO_FAN BIT(9)
 #define ACER_CAP_PLATFORM_PROFILE BIT(10)
 #define ACER_CAP_FAN_SPEED_READ BIT(11)
@@ -326,7 +311,6 @@ static bool ec_raw_mode;
 static bool has_type_aa;
 static u16 commun_func_bitmap;
 static u8 commun_fn_key_number;
-static bool cycle_gaming_thermal_profile = true;
 static bool predator_v4;
 static bool nitro_v4;
 
@@ -336,7 +320,6 @@ module_param(threeg, int, 0444);
 module_param(force_series, int, 0444);
 module_param(force_caps, int, 0444);
 module_param(ec_raw_mode, bool, 0444);
-module_param(cycle_gaming_thermal_profile, bool, 0644);
 module_param(predator_v4, bool, 0444);
 module_param(nitro_v4, bool, 0444);
 MODULE_PARM_DESC(mailled, "Set initial state of Mail LED");
@@ -345,9 +328,6 @@ MODULE_PARM_DESC(threeg, "Set initial state of 3G hardware");
 MODULE_PARM_DESC(force_series, "Force a different laptop series");
 MODULE_PARM_DESC(force_caps, "Force the capability bitmask to this value");
 MODULE_PARM_DESC(ec_raw_mode, "Enable EC raw mode");
-MODULE_PARM_DESC(cycle_gaming_thermal_profile,
-		 "Set thermal mode key in cycle mode. Disabling it sets the "
-		 "mode key in turbo toggle mode");
 MODULE_PARM_DESC(
 	predator_v4,
 	"Enable features for predator laptops that use predator sense v4");
@@ -364,20 +344,6 @@ struct acer_debug {
 	struct dentry *root;
 	u32 wmid_devices;
 };
-
-/*
- * Persistent predator states.
- */
-struct acer_predator_state {
-	int cpu_fan_speed;
-	int gpu_fan_speed;
-	int thermal_profile;
-};
-
-struct power_states {
-	struct acer_predator_state battery_state;
-	struct acer_predator_state ac_state;
-} __packed;
 
 struct per_zone_color {
 	u64 zone1, zone2, zone3, zone4;
@@ -465,10 +431,9 @@ struct acer_wmi {
 	struct acer_debug debug;
 
 	/*
-	 * Protects the cached fan speed pair, the predator power states, the
-	 * keyboard state and the thermal profile bookkeeping shared between
-	 * the sysfs, WMI notify and state save/restore paths. May be held
-	 * across ACPI/WMI operations, so it must stay a mutex.
+	 * Protects the cached fan speed pair, keyboard state, power-source
+	 * state and thermal profile shared by the sysfs and WMI event paths.
+	 * May be held across ACPI/WMI operations, so it must stay a mutex.
 	 */
 	struct mutex lock;
 
@@ -495,19 +460,11 @@ struct acer_wmi {
 	struct device *platform_profile_dev;
 	bool platform_profile_support;
 
-	/*
-	 * The profile used before turbo mode. Needed for returning from turbo
-	 * mode when the mode key is in toggle mode.
-	 */
-	int last_non_turbo_profile;
-
-	/* The most performant supported profile */
-	int max_perf;
+	bool on_ac;
+	u8 thermal_profile;
 
 	int cpu_fan_speed;
 	int gpu_fan_speed;
-
-	struct power_states current_states;
 	struct kb_state current_kb_state;
 
 	u64 supported_sensors;
@@ -524,15 +481,6 @@ static LIST_HEAD(acer_wmi_instances);
 static DEFINE_MUTEX(acer_wmi_instances_lock);
 static bool acer_wmi_shutting_down;
 
-/* The default state used when no valid state file can be loaded */
-#define ACER_PREDATOR_STATE_DEFAULTS                                   \
-	{                                                              \
-		.battery_state = { 0, 0,                               \
-				   ACER_PREDATOR_V4_THERMAL_PROFILE_ECO }, \
-		.ac_state = { 0, 0,                                    \
-			      ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED }, \
-	}
-
 /*
  * Embedded Controller quirks
  * Some laptops require us to directly access the EC to either enable or query
@@ -544,7 +492,6 @@ struct quirk_entry {
 	u8 mailled;
 	s8 brightness;
 	u8 bluetooth;
-	u8 turbo;
 	u8 cpu_fans;
 	u8 gpu_fans;
 	u8 predator_v4;
@@ -563,10 +510,8 @@ static void set_quirks(struct acer_wmi *acer)
 	if (quirks->brightness)
 		acer->capability |= ACER_CAP_BRIGHTNESS;
 
-	if (quirks->turbo)
-		acer->capability |= ACER_CAP_TURBO_OC |
-					 ACER_CAP_TURBO_LED |
-					 ACER_CAP_TURBO_FAN;
+	if (quirks->cpu_fans || quirks->gpu_fans)
+		acer->capability |= ACER_CAP_TURBO_FAN;
 
 	/* Some acer nitro laptops don't have features like lcd override , boot
      * animation sound so this is used. Think wisely before using any quirks
@@ -621,12 +566,13 @@ static struct quirk_entry quirk_acer_travelmate_2490 = {
 };
 
 static struct quirk_entry quirk_acer_predator_ph315_53 = {
-	.turbo = 1,
 	.cpu_fans = 1,
 	.gpu_fans = 1,
 };
 
 static struct quirk_entry quirk_acer_predator_phn16_71 = {
+	.cpu_fans = 1,
+	.gpu_fans = 1,
 	.predator_v4 = 1,
 	.four_zone_kb = 1,
 };
@@ -1766,54 +1712,6 @@ static int WMI_gaming_execute_u32_u64(struct acer_wmi *acer, u32 method_id,
 	return 0;
 }
 
-static acpi_status WMID_gaming_set_u64(struct acer_wmi *acer, u64 value,
-				       u32 cap)
-{
-	u32 method_id = 0;
-
-	if (!has_cap(acer, cap))
-		return AE_BAD_PARAMETER;
-
-	switch (cap) {
-	case ACER_CAP_TURBO_LED:
-		method_id = ACER_WMID_SET_GAMING_LED_METHODID;
-		break;
-	case ACER_CAP_TURBO_FAN:
-		method_id = ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID;
-		break;
-	default:
-		return AE_BAD_PARAMETER;
-	}
-
-	return WMI_gaming_execute_u64(acer, method_id, value, NULL);
-}
-
-static acpi_status WMID_gaming_get_u64(struct acer_wmi *acer, u64 *value,
-				       u32 cap)
-{
-	acpi_status status;
-	u64 result;
-	u64 input;
-	u32 method_id;
-
-	if (!has_cap(acer, cap))
-		return AE_BAD_PARAMETER;
-
-	switch (cap) {
-	case ACER_CAP_TURBO_LED:
-		method_id = ACER_WMID_GET_GAMING_LED_METHODID;
-		input = 0x1;
-		break;
-	default:
-		return AE_BAD_PARAMETER;
-	}
-	status = WMI_gaming_execute_u64(acer, method_id, input, &result);
-	if (ACPI_SUCCESS(status))
-		*value = (u64)result;
-
-	return status;
-}
-
 static int WMID_gaming_get_sys_info(struct acer_wmi *acer, u32 command,
 				    u64 *out)
 {
@@ -1833,28 +1731,6 @@ static int WMID_gaming_get_sys_info(struct acer_wmi *acer, u32 command,
 	*out = result;
 
 	return 0;
-}
-
-static acpi_status WMID_gaming_set_fan_mode(struct acer_wmi *acer, u8 fan_mode)
-{
-	/* fan_mode = 1 is used for auto, fan_mode = 2 used for turbo*/
-	u64 gpu_fan_config1 = 0, gpu_fan_config2 = 0;
-	int i;
-
-	if (quirks->cpu_fans > 0)
-		gpu_fan_config2 |= 1;
-	for (i = 0; i < (quirks->cpu_fans + quirks->gpu_fans); ++i)
-		gpu_fan_config2 |= 1 << (i + 1);
-	for (i = 0; i < quirks->gpu_fans; ++i)
-		gpu_fan_config2 |= 1 << (i + 3);
-	if (quirks->cpu_fans > 0)
-		gpu_fan_config1 |= fan_mode;
-	for (i = 0; i < (quirks->cpu_fans + quirks->gpu_fans); ++i)
-		gpu_fan_config1 |= fan_mode << (2 * i + 2);
-	for (i = 0; i < quirks->gpu_fans; ++i)
-		gpu_fan_config1 |= fan_mode << (2 * i + 6);
-	return WMID_gaming_set_u64(acer, gpu_fan_config2 | gpu_fan_config1 << 16,
-				   ACER_CAP_TURBO_FAN);
 }
 
 static int WMID_gaming_set_misc_setting(struct acer_wmi *acer,
@@ -2158,6 +2034,9 @@ static int acer_gsensor_event(struct acer_wmi *acer)
 static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 				      int t_cpu_fan_speed, int t_gpu_fan_speed);
 
+static acpi_status battery_health_set(struct acer_wmi *acer, u8 function,
+				      u8 function_status);
+
 //  static int acer_get_fan_speed(int fan) {
 //      if (quirks->predator_v4 || quirks->nitro_sense) {
 //          acpi_status status;
@@ -2178,187 +2057,217 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 //      return -EOPNOTSUPP;
 //  }
 
-/*
- *  Predator series turbo button
- */
-static int acer_toggle_turbo(struct acer_wmi *acer)
+static int acer_power_source_refresh_locked(struct acer_wmi *acer)
 {
-	u64 turbo_led_state;
-	acpi_status status;
+	u64 on_ac;
 	int err;
 
-	/* Get current state from turbo button */
-	if (ACPI_FAILURE(
-		    WMID_gaming_get_u64(acer, &turbo_led_state,
-					ACER_CAP_TURBO_LED)))
-		return -EIO;
-
-	if (turbo_led_state) {
-		/* Turn off turbo led */
-		status = WMID_gaming_set_u64(acer, 0x1, ACER_CAP_TURBO_LED);
-		if (ACPI_FAILURE(status))
-			goto failed;
-
-		/* Set FAN mode to auto */
-		status = WMID_gaming_set_fan_mode(acer, 0x1);
-		if (ACPI_FAILURE(status))
-			goto failed;
-
-		/* Set OC to normal */
-		if (has_cap(acer, ACER_CAP_TURBO_OC)) {
-			err = WMID_gaming_set_misc_setting(
-				acer, ACER_WMID_MISC_SETTING_OC_1,
-				ACER_WMID_OC_NORMAL);
-			if (err)
-				goto failed;
-
-			err = WMID_gaming_set_misc_setting(
-				acer, ACER_WMID_MISC_SETTING_OC_2,
-				ACER_WMID_OC_NORMAL);
-			if (err)
-				goto failed;
-		}
-	} else {
-		/* Turn on turbo led */
-		status = WMID_gaming_set_u64(acer, 0x10001,
-					     ACER_CAP_TURBO_LED);
-		if (ACPI_FAILURE(status))
-			goto failed;
-
-		/* Set FAN mode to turbo */
-		status = WMID_gaming_set_fan_mode(acer, 0x2);
-		if (ACPI_FAILURE(status))
-			goto failed;
-
-		/* Set OC to turbo mode */
-		if (has_cap(acer, ACER_CAP_TURBO_OC)) {
-			err = WMID_gaming_set_misc_setting(
-				acer, ACER_WMID_MISC_SETTING_OC_1,
-				ACER_WMID_OC_TURBO);
-			if (err)
-				goto failed;
-
-			err = WMID_gaming_set_misc_setting(
-				acer, ACER_WMID_MISC_SETTING_OC_2,
-				ACER_WMID_OC_TURBO);
-			if (err)
-				goto failed;
-		}
-	}
-	return turbo_led_state;
-
-failed:
-	pr_err("Failed to toggle turbo mode; partial firmware state may remain\n");
-	return -EIO;
-}
-
-static int
-acer_predator_v4_platform_profile_get(struct device *dev,
-				      enum platform_profile_option *profile)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	u8 tp;
-	int err;
-
-	err = WMID_gaming_get_misc_setting(
-		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, &tp);
+	err = WMID_gaming_get_sys_info(
+		acer, ACER_WMID_CMD_GET_PREDATOR_V4_BAT_STATUS, &on_ac);
 	if (err)
 		return err;
 
-	switch (tp) {
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
-		*profile = PLATFORM_PROFILE_PERFORMANCE;
-		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE:
-		*profile = PLATFORM_PROFILE_BALANCED_PERFORMANCE;
-		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED:
-		*profile = PLATFORM_PROFILE_BALANCED;
-		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET:
-		*profile = PLATFORM_PROFILE_QUIET;
-		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_ECO:
-		*profile = PLATFORM_PROFILE_LOW_POWER;
-		break;
-	default:
-		return -EOPNOTSUPP;
+	acer->on_ac = !!on_ac;
+	return 0;
+}
+
+static u8 acer_default_thermal_profile(bool on_ac)
+{
+	return on_ac ? ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED :
+		       ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
+}
+
+static u8 acer_thermal_profile_for_power_transition(bool old_on_ac,
+						  bool new_on_ac,
+						  u8 current)
+{
+	if (old_on_ac && !new_on_ac)
+		return current == ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET ?
+		       ACER_PREDATOR_V4_THERMAL_PROFILE_ECO :
+		       ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+
+	if (!old_on_ac && new_on_ac)
+		return current == ACER_PREDATOR_V4_THERMAL_PROFILE_ECO ?
+		       ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET :
+		       ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+
+	return current;
+}
+
+static u8 acer_next_thermal_profile(bool on_ac, u8 current)
+{
+	if (!on_ac) {
+		if (current == ACER_PREDATOR_V4_THERMAL_PROFILE_ECO)
+			return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
 	}
+
+	switch (current) {
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
+	default:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+	}
+}
+
+static u8 acer_platform_profile_to_thermal_profile(
+		enum platform_profile_option profile)
+{
+	switch (profile) {
+	case PLATFORM_PROFILE_LOW_POWER:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
+	case PLATFORM_PROFILE_QUIET:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
+	case PLATFORM_PROFILE_BALANCED:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+	case PLATFORM_PROFILE_BALANCED_PERFORMANCE:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
+	case PLATFORM_PROFILE_PERFORMANCE:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
+	default:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+	}
+}
+
+static u8 acer_normalize_platform_profile(bool on_ac,
+					   enum platform_profile_option profile)
+{
+	if (on_ac) {
+		switch (profile) {
+		case PLATFORM_PROFILE_LOW_POWER:
+		case PLATFORM_PROFILE_QUIET:
+			return ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
+		case PLATFORM_PROFILE_BALANCED:
+			return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+		case PLATFORM_PROFILE_BALANCED_PERFORMANCE:
+			return ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
+		case PLATFORM_PROFILE_PERFORMANCE:
+			return ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
+		default:
+			return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+		}
+	}
+
+	switch (profile) {
+	case PLATFORM_PROFILE_LOW_POWER:
+	case PLATFORM_PROFILE_QUIET:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
+	case PLATFORM_PROFILE_BALANCED:
+	case PLATFORM_PROFILE_BALANCED_PERFORMANCE:
+	case PLATFORM_PROFILE_PERFORMANCE:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+	default:
+		return ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
+	}
+}
+
+static int acer_apply_thermal_profile_locked(struct acer_wmi *acer, u8 profile)
+{
+	struct wmi_device *wdev;
+	enum linuwu_sense_fan_mode fan_mode;
+	acpi_status status;
+	int err;
+
+	err = WMID_gaming_set_misc_setting(
+		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, profile);
+	if (err)
+		return err;
+
+	acer->thermal_profile = profile;
+
+	if (!quirks->predator_v4 || !has_cap(acer, ACER_CAP_TURBO_FAN))
+		return 0;
+
+	wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	if (!wdev)
+		return -ENODEV;
+
+	fan_mode = (profile == ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE ||
+		    profile == ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO) ?
+		   LINUWU_SENSE_FAN_MODE_TURBO : LINUWU_SENSE_FAN_MODE_AUTO;
+
+	status = linuwu_sense_fan_set_mode(wdev, quirks->cpu_fans,
+					   quirks->gpu_fans, fan_mode);
+	if (ACPI_FAILURE(status))
+		return -EIO;
 
 	return 0;
 }
 
 static int
-acer_predator_v4_platform_profile_set(struct device *dev,
-				      enum platform_profile_option profile)
+acer_predator_v4_platform_profile_get(struct device *dev,
+				       enum platform_profile_option *profile)
 {
 	struct acer_wmi *acer = dev_get_drvdata(dev);
-	int err, tp;
-	acpi_status status;
-	u64 on_AC;
+	u8 tp;
+	int err;
+
+	mutex_lock(&acer->lock);
+	err = WMID_gaming_get_misc_setting(
+		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, &tp);
+	if (!err) {
+		switch (tp) {
+		case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
+			*profile = PLATFORM_PROFILE_PERFORMANCE;
+			break;
+		case ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE:
+			*profile = PLATFORM_PROFILE_BALANCED_PERFORMANCE;
+			break;
+		case ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED:
+			*profile = PLATFORM_PROFILE_BALANCED;
+			break;
+		case ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET:
+			*profile = PLATFORM_PROFILE_QUIET;
+			break;
+		case ACER_PREDATOR_V4_THERMAL_PROFILE_ECO:
+			*profile = PLATFORM_PROFILE_LOW_POWER;
+			break;
+		default:
+			err = -EOPNOTSUPP;
+			break;
+		}
+	}
+	if (!err)
+		acer->thermal_profile = tp;
+	mutex_unlock(&acer->lock);
+
+	return err;
+}
+
+static int
+acer_predator_v4_platform_profile_set(struct device *dev,
+				       enum platform_profile_option profile)
+{
+	struct acer_wmi *acer = dev_get_drvdata(dev);
+	bool old_on_ac;
+	u8 tp;
+	int err;
 
 	mutex_lock(&acer->lock);
 
-	/* Check Power Source */
-	status = WMI_gaming_execute_u64(
-		acer, ACER_WMID_GET_GAMING_SYS_INFO_METHODID,
-		ACER_WMID_CMD_GET_PREDATOR_V4_BAT_STATUS, &on_AC);
-
-	if (ACPI_FAILURE(status)) {
-		err = -EIO;
+	if (!quirks->predator_v4) {
+		tp = acer_platform_profile_to_thermal_profile(profile);
+		err = acer_apply_thermal_profile_locked(acer, tp);
 		goto out;
 	}
 
-	/* Check power source */
-	/* Blocking these modes since in official version this is not supported
-     * when its not plugged in AC! */
-	if (!on_AC && (profile == PLATFORM_PROFILE_PERFORMANCE ||
-		       profile == PLATFORM_PROFILE_BALANCED_PERFORMANCE ||
-		       profile == PLATFORM_PROFILE_QUIET)) {
-		err = -EOPNOTSUPP;
-		goto out;
-	}
-
-	/* turn the fan down i mean its quiet mode | eco mode after all*/
-	if (profile == PLATFORM_PROFILE_QUIET ||
-	    profile == PLATFORM_PROFILE_LOW_POWER) {
-		acpi_status stat = acer_set_fan_speed(acer, 0, 0);
-		if (ACPI_FAILURE(stat)) {
-			err = -EIO;
-			goto out;
-		}
-	}
-
-	switch (profile) {
-	case PLATFORM_PROFILE_PERFORMANCE:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
-		break;
-	case PLATFORM_PROFILE_BALANCED_PERFORMANCE:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
-		break;
-	case PLATFORM_PROFILE_BALANCED:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
-		break;
-	case PLATFORM_PROFILE_QUIET:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
-		break;
-	case PLATFORM_PROFILE_LOW_POWER:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
-		break;
-	default:
-		err = -EOPNOTSUPP;
-		goto out;
-	}
-
-	err = WMID_gaming_set_misc_setting(
-		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, tp);
+	old_on_ac = acer->on_ac;
+	err = acer_power_source_refresh_locked(acer);
 	if (err)
 		goto out;
 
-	if (tp != acer->max_perf)
-		acer->last_non_turbo_profile = tp;
+	if (old_on_ac != acer->on_ac)
+		acer->thermal_profile = acer_thermal_profile_for_power_transition(
+			old_on_ac, acer->on_ac, acer->thermal_profile);
 
-	err = 0;
+	tp = acer_normalize_platform_profile(acer->on_ac, profile);
+	err = acer_apply_thermal_profile_locked(acer, tp);
 
 out:
 	mutex_unlock(&acer->lock);
@@ -2366,79 +2275,81 @@ out:
 }
 
 static int acer_predator_v4_platform_profile_probe(void *drvdata,
-						   unsigned long *choices)
+					   unsigned long *choices)
 {
-	struct acer_wmi *acer = drvdata;
 	unsigned long supported_profiles = 0;
 	int err;
 
 	err = WMID_gaming_get_misc_setting(
-		acer, ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES,
+		drvdata, ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES,
 		(u8 *)&supported_profiles);
 	if (err)
 		return err;
 
-	/* Iterate through supported profiles in order of increasing performance */
 	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_ECO,
-		     &supported_profiles)) {
+		     &supported_profiles))
 		set_bit(PLATFORM_PROFILE_LOW_POWER, choices);
-		acer->max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
-		acer->last_non_turbo_profile =
-			ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
-	}
-
 	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET,
-		     &supported_profiles)) {
+		     &supported_profiles))
 		set_bit(PLATFORM_PROFILE_QUIET, choices);
-		acer->max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
-		acer->last_non_turbo_profile =
-			ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
-	}
-
 	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED,
-		     &supported_profiles)) {
+		     &supported_profiles))
 		set_bit(PLATFORM_PROFILE_BALANCED, choices);
-		acer->max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
-		acer->last_non_turbo_profile =
-			ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
-	}
-
 	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE,
-		     &supported_profiles)) {
+		     &supported_profiles))
 		set_bit(PLATFORM_PROFILE_BALANCED_PERFORMANCE, choices);
-		acer->max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
-
-		/* We only use this profile as a fallback option in case no prior
-             * profile is supported.
-             */
-		if (acer->last_non_turbo_profile < 0)
-			acer->last_non_turbo_profile =
-				ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
-	}
-
 	if (test_bit(ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO,
-		     &supported_profiles)) {
+		     &supported_profiles))
 		set_bit(PLATFORM_PROFILE_PERFORMANCE, choices);
-		acer->max_perf = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
-
-		/* We need to handle the hypothetical case where only the turbo
-             * profile is supported. In this case the turbo toggle will
-             * essentially be a no-op.
-             */
-		if (acer->last_non_turbo_profile < 0)
-			acer->last_non_turbo_profile =
-				ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
-	}
 
 	return 0;
 }
 
-static int acer_predator_state_update(struct acer_wmi *acer, int value);
+static int acer_thermal_profile_init(struct acer_wmi *acer)
+{
+	u8 profile;
+	int err;
 
-static int acer_predator_state_restore(struct acer_wmi *acer, int value);
+	mutex_lock(&acer->lock);
+	err = acer_power_source_refresh_locked(acer);
+	if (!err) {
+		profile = acer_default_thermal_profile(acer->on_ac);
+		err = acer_apply_thermal_profile_locked(acer, profile);
+	}
+	mutex_unlock(&acer->lock);
 
-static acpi_status battery_health_set(struct acer_wmi *acer, u8 function,
-				      u8 function_status);
+	return err;
+}
+
+static int acer_thermal_profile_change(struct acer_wmi *acer)
+{
+	bool old_on_ac;
+	u8 next;
+	int err;
+
+	if (!quirks->predator_v4)
+		return 0;
+
+	mutex_lock(&acer->lock);
+	old_on_ac = acer->on_ac;
+	err = acer_power_source_refresh_locked(acer);
+	if (err)
+		goto out;
+
+	if (old_on_ac != acer->on_ac)
+		acer->thermal_profile = acer_thermal_profile_for_power_transition(
+			old_on_ac, acer->on_ac, acer->thermal_profile);
+
+	next = acer_next_thermal_profile(acer->on_ac, acer->thermal_profile);
+	err = acer_apply_thermal_profile_locked(acer, next);
+out:
+	mutex_unlock(&acer->lock);
+
+	if (!err && acer->platform_profile_support)
+		platform_profile_notify(acer->platform_profile_dev);
+
+	return err;
+}
 
 static const struct platform_profile_ops acer_predator_v4_platform_profile_ops = {
 	.probe = acer_predator_v4_platform_profile_probe,
@@ -2480,111 +2391,6 @@ static int acer_platform_profile_setup(struct acer_wmi *acer)
 		"profile support.\n");
 	acer->platform_profile_dev = NULL;
 	acer->platform_profile_support = false;
-
-	return 0;
-}
-
-static int acer_thermal_profile_change(struct acer_wmi *acer)
-{
-	/*
-     * This mode key can rotate each mode or toggle turbo mode.
-     * On battery, only ECO and BALANCED mode are available.
-     */
-	if (quirks->predator_v4 || quirks->nitro_sense || quirks->nitro_v4) {
-		u8 current_tp;
-		int tp, err;
-		u64 on_AC;
-		acpi_status status;
-
-		mutex_lock(&acer->lock);
-
-		err = WMID_gaming_get_misc_setting(
-			acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE,
-			&current_tp);
-		if (err)
-			goto out;
-		/* Check power source */
-		status = WMI_gaming_execute_u64(
-			acer, ACER_WMID_GET_GAMING_SYS_INFO_METHODID,
-			ACER_WMID_CMD_GET_PREDATOR_V4_BAT_STATUS, &on_AC);
-
-		if (ACPI_FAILURE(status)) {
-			err = -EIO;
-			goto out;
-		}
-
-		/* On AC - define next profile transitions */
-		if (!on_AC) {
-			if (current_tp == ACER_PREDATOR_V4_THERMAL_PROFILE_ECO)
-				tp = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
-			else
-				tp = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
-		} else {
-			switch (current_tp) {
-			case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
-				tp = cycle_gaming_thermal_profile ?
-					     ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET :
-					     acer->last_non_turbo_profile;
-				break;
-			case ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE:
-				tp = (acer->max_perf == current_tp) ?
-					     acer->last_non_turbo_profile :
-					     acer->max_perf;
-				break;
-			case ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED:
-				tp = cycle_gaming_thermal_profile ?
-					     ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE :
-					     acer->max_perf;
-				break;
-			case ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET:
-				tp = cycle_gaming_thermal_profile ?
-					     ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED :
-					     acer->max_perf;
-				break;
-			case ACER_PREDATOR_V4_THERMAL_PROFILE_ECO:
-				tp = cycle_gaming_thermal_profile ?
-					     ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET :
-					     acer->max_perf;
-				break;
-			default:
-				err = -EOPNOTSUPP;
-				goto out;
-			}
-		}
-
-		err = WMID_gaming_set_misc_setting(
-			acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, tp);
-		if (err)
-			goto out;
-
-		/* the quiter you become the more you'll be able to hear! */
-		if (tp == ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET ||
-		    tp == ACER_PREDATOR_V4_THERMAL_PROFILE_ECO) {
-			acpi_status stat = acer_set_fan_speed(acer, 0, 0);
-			if (ACPI_FAILURE(stat)) {
-				err = -EIO;
-				goto out;
-			}
-		}
-		/* Store non-turbo profile for turbo mode toggle*/
-		if (tp != acer->max_perf)
-			acer->last_non_turbo_profile = tp;
-
-		err = 0;
-
-out:
-		mutex_unlock(&acer->lock);
-
-		/*
-		 * platform_profile_notify() takes the platform profile core
-		 * lock, which is already held while profile_set() calls into
-		 * this driver, so it must not run under acer->lock.
-		 */
-		if (!err && acer->platform_profile_support)
-			platform_profile_notify(acer->platform_profile_dev);
-
-		return err;
-	}
 
 	return 0;
 }
@@ -2913,41 +2719,40 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 		acer_kbd_dock_event(acer, &return_value);
 		break;
 	case WMID_GAMING_TURBO_KEY_EVENT:
-		pr_info("pressed turbo button - %d\n", return_value.key_num);
-		if (return_value.key_num == 0x4 &&
-		    !has_cap(acer, ACER_CAP_NITRO_SENSE_V4))
-			acer_toggle_turbo(acer);
-		if ((return_value.key_num == 0x5 ||
-		     (return_value.key_num == 0x4 &&
-		      has_cap(acer, ACER_CAP_NITRO_SENSE_V4))) &&
+		if (return_value.key_num == 0x5 &&
 		    has_cap(acer, ACER_CAP_PLATFORM_PROFILE))
 			acer_thermal_profile_change(acer);
 		break;
 	case WMID_AC_EVENT:
-		if (has_cap(acer, ACER_CAP_PREDATOR_SENSE) ||
-		    has_cap(acer, ACER_CAP_NITRO_SENSE_V4)) {
-			if (return_value.key_num == 0) {
-				mutex_lock(&acer->lock);
-				/* store the current state when it is connected to
-                             * AC*/
-				acer_predator_state_update(acer, 1);
-				/* restore to the state when it was disconnected
-                             * from AC*/
-				acer_predator_state_restore(acer, 0);
-				mutex_unlock(&acer->lock);
-			} else if (return_value.key_num == 1) {
-				mutex_lock(&acer->lock);
-				/* store the current state when it is disconnected
-                             * from AC*/
-				acer_predator_state_update(acer, 0);
-				/* restore to the state when it was connected to
-                             * AC*/
-				acer_predator_state_restore(acer, 1);
-				mutex_unlock(&acer->lock);
-			} else {
-				pr_info("Unknown key number - %d\n",
+		if (quirks->predator_v4 &&
+		    has_cap(acer, ACER_CAP_PLATFORM_PROFILE)) {
+			bool old_on_ac, new_on_ac;
+			u8 target;
+			int err;
+
+			if (return_value.key_num > 1) {
+				pr_info("Unknown AC event key number - %d\n",
 					return_value.key_num);
+				break;
 			}
+
+			new_on_ac = return_value.key_num == 0;
+
+			mutex_lock(&acer->lock);
+			old_on_ac = acer->on_ac;
+			if (old_on_ac == new_on_ac) {
+				err = 0;
+			} else {
+				target = acer_thermal_profile_for_power_transition(
+					old_on_ac, new_on_ac, acer->thermal_profile);
+				acer->on_ac = new_on_ac;
+				err = acer_apply_thermal_profile_locked(acer, target);
+			}
+			mutex_unlock(&acer->lock);
+
+			if (!err && old_on_ac != new_on_ac &&
+			    acer->platform_profile_support)
+				platform_profile_notify(acer->platform_profile_dev);
 		}
 		break;
 	case WMID_BATTERY_BOOST_EVENT:
@@ -3419,22 +3224,18 @@ static ssize_t preadtor_battery_calibration_store(struct device *dev,
 /*
  * FAN CONTROLS
  */
-static u64 fan_val_calc(int percentage, int fan_index)
-{
-	return (((percentage * 25600) / 100) & 0xFF00) + fan_index;
-}
-
 static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 				      int t_cpu_fan_speed, int t_gpu_fan_speed)
 {
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
 	acpi_status status;
+
+	if (!wdev)
+		return AE_ERROR;
 
 	if (t_cpu_fan_speed == 100 && t_gpu_fan_speed == 100) {
 		pr_info("MAX FAN MODE!\n");
-		status = WMI_gaming_execute_u64(
-			acer,
-			ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID, 0x820009,
-			NULL);
+		status = linuwu_sense_fan_set_behavior(wdev, 0x820009);
 		if (ACPI_FAILURE(status)) {
 			pr_err("Error setting fan speed status: %s\n",
 			       acpi_format_exception(status));
@@ -3442,10 +3243,7 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 		}
 	} else if (t_cpu_fan_speed == 0 && t_gpu_fan_speed == 0) {
 		pr_info("AUTO FAN MODE!\n");
-		status = WMI_gaming_execute_u64(
-			acer,
-			ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID, 0x410009,
-			NULL);
+		status = linuwu_sense_fan_set_behavior(wdev, 0x410009);
 		if (ACPI_FAILURE(status)) {
 			pr_err("Error setting fan speed status: %s\n",
 			       acpi_format_exception(status));
@@ -3454,28 +3252,22 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 	} else if (t_cpu_fan_speed <= 100 && t_gpu_fan_speed <= 100) {
 		if (t_cpu_fan_speed == 0) {
 			pr_info("CUSTOM FAN MODE (GPU)\n");
-			status = WMI_gaming_execute_u64(
-				acer,
-				ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID,
-				0x10001, NULL);
+			status = linuwu_sense_fan_set_behavior(wdev, 0x10001);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
 				return AE_ERROR;
 			}
-			status = WMI_gaming_execute_u64(
-				acer,
-				ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID,
-				0xC00008, NULL);
+
+			status = linuwu_sense_fan_set_behavior(wdev, 0xC00008);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
 				return AE_ERROR;
 			}
-			status = WMI_gaming_execute_u64(
-				acer,
-				ACER_WMID_SET_GAMING_FAN_SPEED_METHODID,
-				fan_val_calc(t_gpu_fan_speed, 4), NULL);
+
+			status = linuwu_sense_fan_set_speed(
+				wdev, LINUWU_SENSE_FAN_GPU, t_gpu_fan_speed);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
@@ -3483,28 +3275,22 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 			}
 		} else if (t_gpu_fan_speed == 0) {
 			pr_info("CUSTOM FAN MODE (CPU)\n");
-			status = WMI_gaming_execute_u64(
-				acer,
-				ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID,
-				0x400008, NULL);
+			status = linuwu_sense_fan_set_behavior(wdev, 0x400008);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
 				return AE_ERROR;
 			}
-			status = WMI_gaming_execute_u64(
-				acer,
-				ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID,
-				0x30001, NULL);
+
+			status = linuwu_sense_fan_set_behavior(wdev, 0x30001);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
 				return AE_ERROR;
 			}
-			status = WMI_gaming_execute_u64(
-				acer,
-				ACER_WMID_SET_GAMING_FAN_SPEED_METHODID,
-				fan_val_calc(t_cpu_fan_speed, 1), NULL);
+
+			status = linuwu_sense_fan_set_speed(
+				wdev, LINUWU_SENSE_FAN_CPU, t_cpu_fan_speed);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
@@ -3512,31 +3298,23 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 			}
 		} else {
 			pr_info("CUSTOM FAN MODE (MIXED)!\n");
-			// set gaming behvaiour mode to custom
-			status = WMI_gaming_execute_u64(
-				acer,
-				ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID,
-				0xC30009, NULL);
+			status = linuwu_sense_fan_set_behavior(wdev, 0xC30009);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
 				return AE_ERROR;
 			}
-			// set cpu fan speed
-			status = WMI_gaming_execute_u64(
-				acer,
-				ACER_WMID_SET_GAMING_FAN_SPEED_METHODID,
-				fan_val_calc(t_cpu_fan_speed, 1), NULL);
+
+			status = linuwu_sense_fan_set_speed(
+				wdev, LINUWU_SENSE_FAN_CPU, t_cpu_fan_speed);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
 				return AE_ERROR;
 			}
-			// set gpu fan speed
-			status = WMI_gaming_execute_u64(
-				acer,
-				ACER_WMID_SET_GAMING_FAN_SPEED_METHODID,
-				fan_val_calc(t_gpu_fan_speed, 4), NULL);
+
+			status = linuwu_sense_fan_set_speed(
+				wdev, LINUWU_SENSE_FAN_GPU, t_gpu_fan_speed);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
@@ -3613,216 +3391,6 @@ static ssize_t predator_fan_speed_store(struct device *dev,
 
 	return count;
 }
-/*
- * persistent predator states.
- */
-
-static int acer_predator_state_update(struct acer_wmi *acer, int value)
-{
-	u8 current_tp;
-	int tp, err;
-
-	err = WMID_gaming_get_misc_setting(
-		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, &current_tp);
-	if (err)
-		return err;
-	switch (current_tp) {
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
-		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
-		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
-		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
-		break;
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_ECO:
-		tp = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
-		break;
-	default:
-		return -EOPNOTSUPP;
-	}
-	/* When AC is connected */
-	if (value == 1) {
-		acer->current_states.ac_state.thermal_profile = tp;
-		acer->current_states.ac_state.cpu_fan_speed =
-			acer->cpu_fan_speed;
-		acer->current_states.ac_state.gpu_fan_speed =
-			acer->gpu_fan_speed;
-		/* When AC isn't connected */
-	} else if (value == 0) {
-		acer->current_states.battery_state.thermal_profile = tp;
-		acer->current_states.battery_state.cpu_fan_speed =
-			acer->cpu_fan_speed;
-		acer->current_states.battery_state.gpu_fan_speed =
-			acer->gpu_fan_speed;
-	} else {
-		pr_err("invalid value received: %d\n", value);
-		return -EINVAL;
-	}
-	return 0;
-}
-
-static int acer_predator_state_restore(struct acer_wmi *acer, int value)
-{
-	int err = WMID_gaming_set_misc_setting(
-		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE,
-		value == 0 ?
-			acer->current_states.battery_state.thermal_profile :
-			acer->current_states.ac_state.thermal_profile);
-	if (err)
-		return err;
-
-	acpi_status status = acer_set_fan_speed(
-		acer,
-		value == 0 ? acer->current_states.battery_state.cpu_fan_speed :
-			     acer->current_states.ac_state.cpu_fan_speed,
-		value == 0 ? acer->current_states.battery_state.gpu_fan_speed :
-			     acer->current_states.ac_state.gpu_fan_speed);
-	if (ACPI_FAILURE(status)) {
-		return -EIO;
-	}
-
-	return 0;
-}
-
-static bool acer_predator_state_valid_one(const struct acer_predator_state *state)
-{
-	if (state->cpu_fan_speed < 0 || state->cpu_fan_speed > 100)
-		return false;
-	if (state->gpu_fan_speed < 0 || state->gpu_fan_speed > 100)
-		return false;
-
-	switch (state->thermal_profile) {
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE:
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED:
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET:
-	case ACER_PREDATOR_V4_THERMAL_PROFILE_ECO:
-		return true;
-	default:
-		return false;
-	}
-}
-
-static bool acer_predator_state_valid(const struct power_states *state)
-{
-	return acer_predator_state_valid_one(&state->battery_state) &&
-	       acer_predator_state_valid_one(&state->ac_state);
-}
-
-static int acer_predator_state_load(struct acer_wmi *acer)
-{
-	const struct power_states default_states = ACER_PREDATOR_STATE_DEFAULTS;
-	u64 on_AC;
-	struct file *file;
-	ssize_t len;
-	acpi_status status;
-	int err;
-
-	mutex_lock(&acer->lock);
-
-	/* Start from a well known state and only overwrite it with a fully
-	 * validated state file.
-	 */
-	acer->current_states = default_states;
-
-	file = filp_open(STATE_FILE, O_RDONLY, 0);
-	if (!IS_ERR(file)) {
-		struct power_states state;
-
-		len = kernel_read(file, (char *)&state, sizeof(state),
-				  &file->f_pos);
-		filp_close(file, NULL);
-
-		if (len != sizeof(state)) {
-			pr_err("Incomplete state read, using defaults\n");
-		} else if (!acer_predator_state_valid(&state)) {
-			pr_err("Invalid state data, using defaults\n");
-		} else {
-			acer->current_states = state;
-			pr_info("Thermal states loaded\n");
-		}
-	} else {
-		pr_info("State file not found, loading defaults\n");
-	}
-
-	/* Always proceed to restore state based on power source */
-	status = WMI_gaming_execute_u64(
-		acer, ACER_WMID_GET_GAMING_SYS_INFO_METHODID,
-		ACER_WMID_CMD_GET_PREDATOR_V4_BAT_STATUS, &on_AC);
-
-	if (ACPI_FAILURE(status)) {
-		pr_err("Failed to query power source state\n");
-		err = -EIO;
-		goto out;
-	}
-
-	/* Restore state based on power source (0 for battery, 1 for AC) */
-	err = acer_predator_state_restore(acer, on_AC == 0 ? 0 : 1);
-	if (err) {
-		pr_err("Failed to restore thermal state\n");
-		goto out;
-	}
-
-	pr_info("Thermal states restored successfully\n");
-	err = 0;
-
-out:
-	mutex_unlock(&acer->lock);
-	return err;
-}
-
-static int acer_predator_state_save(struct acer_wmi *acer)
-{
-	u64 on_AC;
-	acpi_status status;
-	struct file *file;
-	ssize_t len;
-	int err;
-	struct power_states state;
-
-	status = WMI_gaming_execute_u64(
-		acer, ACER_WMID_GET_GAMING_SYS_INFO_METHODID,
-		ACER_WMID_CMD_GET_PREDATOR_V4_BAT_STATUS, &on_AC);
-	if (ACPI_FAILURE(status))
-		return -EIO;
-
-	/* update to the latest state based on power source */
-	mutex_lock(&acer->lock);
-	err = acer_predator_state_update(acer, on_AC == 0 ? 0 : 1);
-	if (err) {
-		mutex_unlock(&acer->lock);
-		return err;
-	}
-	state = acer->current_states;
-	mutex_unlock(&acer->lock);
-
-	file = filp_open(STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (IS_ERR(file)) {
-		pr_info("state_access - Error opening file\n");
-		return PTR_ERR(file);
-	}
-
-	len = kernel_write(file, (char *)&state, sizeof(state), &file->f_pos);
-	if (len < 0) {
-		pr_info("state_access - Error writing to file: %ld\n", len);
-	}
-
-	filp_close(file, NULL);
-
-	if (len != sizeof(state)) {
-		pr_err("Failed to write complete state to file\n");
-		return -EIO;
-	}
-
-	pr_info("Thermal states saved successfully\n");
-	return 0;
-}
-
 /*
  *LCD OVERRIDE CONTROLS
  */
@@ -4602,22 +4170,26 @@ static int acer_platform_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	if (has_cap(acer, ACER_CAP_PLATFORM_PROFILE))
+	if (has_cap(acer, ACER_CAP_PLATFORM_PROFILE)) {
+		if (quirks->predator_v4) {
+			err = acer_thermal_profile_init(acer);
+			if (err)
+				return err;
+		}
 		acer_platform_profile_setup(acer);
+	}
 
 	if (has_cap(acer, ACER_CAP_PREDATOR_SENSE)) {
 		err = devm_device_add_group(&pdev->dev,
 					    &preadtor_sense_attr_group);
 		if (err)
 			return err;
-		acer_predator_state_load(acer);
 	}
 	if (has_cap(acer, ACER_CAP_NITRO_SENSE_V4)) {
 		err = devm_device_add_group(&pdev->dev,
 					    &nitro_sense_v4_attr_group);
 		if (err)
 			return err;
-		acer_predator_state_load(acer);
 	}
 	if (has_cap(acer, ACER_CAP_NITRO_SENSE)) {
 		err = devm_device_add_group(&pdev->dev,
@@ -4668,11 +4240,6 @@ static void acer_platform_remove(struct platform_device *pdev)
 	mutex_lock(&acer->event_lock);
 	acer->ready = false;
 	mutex_unlock(&acer->event_lock);
-
-	if (has_cap(acer, ACER_CAP_PREDATOR_SENSE) ||
-	    has_cap(acer, ACER_CAP_NITRO_SENSE) ||
-	    has_cap(acer, ACER_CAP_NITRO_SENSE_V4))
-		acer_predator_state_save(acer);
 
 	if (quirks->four_zone_kb)
 		four_zone_kb_state_save(acer);
