@@ -2192,8 +2192,12 @@ static int acer_apply_thermal_profile_locked(struct acer_wmi *acer, u8 profile)
 	if (!wdev)
 		return -ENODEV;
 
-	fan_mode = (profile == ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE ||
-		    profile == ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO) ?
+	/*
+	 * Only the TURBO thermal profile forces the turbo fan behavior.
+	 * PERFORMANCE (balanced-performance) keeps the EC's automatic fan
+	 * curve.
+	 */
+	fan_mode = profile == ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO ?
 			   LINUWU_SENSE_FAN_MODE_TURBO :
 			   LINUWU_SENSE_FAN_MODE_AUTO;
 
