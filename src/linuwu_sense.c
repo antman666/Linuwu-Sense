@@ -2173,9 +2173,6 @@ static u8 acer_normalize_platform_profile(bool on_ac,
 
 static int acer_apply_thermal_profile_locked(struct acer_wmi *acer, u8 profile)
 {
-	struct wmi_device *wdev;
-	enum linuwu_sense_fan_mode fan_mode;
-	acpi_status status;
 	int err;
 
 	err = WMID_gaming_set_misc_setting(
@@ -2185,24 +2182,31 @@ static int acer_apply_thermal_profile_locked(struct acer_wmi *acer, u8 profile)
 
 	acer->thermal_profile = profile;
 
-	if (!quirks->predator_v4 || !has_cap(acer, ACER_CAP_TURBO_FAN))
-		return 0;
+	return 0;
+}
 
+static bool acer_turbo_fan_supported(struct acer_wmi *acer)
+{
+	return has_cap(acer, ACER_CAP_TURBO_FAN) &&
+	       (quirks->cpu_fans > 0 || quirks->gpu_fans > 0);
+}
+
+static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
+{
+	struct wmi_device *wdev;
+	acpi_status status;
+
+	if (!acer_turbo_fan_supported(acer))
+		return -EOPNOTSUPP;
 	wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
 	if (!wdev)
 		return -ENODEV;
 
-	/*
-	 * Only the TURBO thermal profile forces the turbo fan behavior.
-	 * PERFORMANCE (balanced-performance) keeps the EC's automatic fan
-	 * curve.
-	 */
-	fan_mode = profile == ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO ?
-			   LINUWU_SENSE_FAN_MODE_TURBO :
-			   LINUWU_SENSE_FAN_MODE_AUTO;
+	status = linuwu_sense_fan_set_mode(wdev, quirks->cpu_fans > 0,
+					   quirks->gpu_fans > 0,
+					   turbo ? LINUWU_SENSE_FAN_MODE_TURBO :
+						   LINUWU_SENSE_FAN_MODE_AUTO);
 
-	status = linuwu_sense_fan_set_mode(wdev, quirks->cpu_fans,
-					   quirks->gpu_fans, fan_mode);
 	if (ACPI_FAILURE(status))
 		return -EIO;
 
@@ -3247,7 +3251,9 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 
 	if (t_cpu_fan_speed == 100 && t_gpu_fan_speed == 100) {
 		pr_info("MAX FAN MODE!\n");
-		status = linuwu_sense_fan_set_behavior(wdev, 0x820009);
+		status = linuwu_sense_fan_set_mode(wdev, quirks->cpu_fans > 0,
+						   quirks->gpu_fans > 0,
+						   LINUWU_SENSE_FAN_MODE_TURBO);
 		if (ACPI_FAILURE(status)) {
 			pr_err("Error setting fan speed status: %s\n",
 			       acpi_format_exception(status));
@@ -3255,7 +3261,9 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 		}
 	} else if (t_cpu_fan_speed == 0 && t_gpu_fan_speed == 0) {
 		pr_info("AUTO FAN MODE!\n");
-		status = linuwu_sense_fan_set_behavior(wdev, 0x410009);
+		status = linuwu_sense_fan_set_mode(wdev, quirks->cpu_fans > 0,
+						   quirks->gpu_fans > 0,
+						   LINUWU_SENSE_FAN_MODE_AUTO);
 		if (ACPI_FAILURE(status)) {
 			pr_err("Error setting fan speed status: %s\n",
 			       acpi_format_exception(status));
@@ -3264,14 +3272,18 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 	} else if (t_cpu_fan_speed <= 100 && t_gpu_fan_speed <= 100) {
 		if (t_cpu_fan_speed == 0) {
 			pr_info("CUSTOM FAN MODE (GPU)\n");
-			status = linuwu_sense_fan_set_behavior(wdev, 0x10001);
+			status = linuwu_sense_fan_set_mode(
+				wdev, quirks->cpu_fans > 0, false,
+				LINUWU_SENSE_FAN_MODE_AUTO);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
 				return AE_ERROR;
 			}
 
-			status = linuwu_sense_fan_set_behavior(wdev, 0xC00008);
+			status = linuwu_sense_fan_set_mode(
+				wdev, false, quirks->gpu_fans > 0,
+				LINUWU_SENSE_FAN_MODE_CUSTOM);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
@@ -3287,14 +3299,18 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 			}
 		} else if (t_gpu_fan_speed == 0) {
 			pr_info("CUSTOM FAN MODE (CPU)\n");
-			status = linuwu_sense_fan_set_behavior(wdev, 0x400008);
+			status = linuwu_sense_fan_set_mode(
+				wdev, false, quirks->gpu_fans > 0,
+				LINUWU_SENSE_FAN_MODE_AUTO);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
 				return AE_ERROR;
 			}
 
-			status = linuwu_sense_fan_set_behavior(wdev, 0x30001);
+			status = linuwu_sense_fan_set_mode(
+				wdev, quirks->cpu_fans > 0, false,
+				LINUWU_SENSE_FAN_MODE_CUSTOM);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
@@ -3310,7 +3326,10 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 			}
 		} else {
 			pr_info("CUSTOM FAN MODE (MIXED)!\n");
-			status = linuwu_sense_fan_set_behavior(wdev, 0xC30009);
+			status = linuwu_sense_fan_set_mode(
+				wdev, quirks->cpu_fans > 0,
+				quirks->gpu_fans > 0,
+				LINUWU_SENSE_FAN_MODE_CUSTOM);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
 				       acpi_format_exception(status));
@@ -3400,6 +3419,81 @@ static ssize_t predator_fan_speed_store(struct device *dev,
 	if (ACPI_FAILURE(status)) {
 		return -ENODEV;
 	}
+
+	return count;
+}
+
+static ssize_t predator_turbo_mode_show(struct device *dev,
+					struct device_attribute *attr,
+					char *buf)
+{
+	struct acer_wmi *acer = dev_get_drvdata(dev);
+	struct wmi_device *wdev;
+	enum linuwu_sense_fan_mode mode;
+	bool enabled = true;
+	bool have_fan = false;
+	acpi_status status;
+
+	if (!acer_turbo_fan_supported(acer))
+		return -EOPNOTSUPP;
+
+	mutex_lock(&acer->lock);
+	wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	if (!wdev) {
+		status = AE_ERROR;
+		goto out;
+	}
+
+	if (quirks->cpu_fans > 0) {
+		status = linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_CPU,
+						   &mode);
+		if (ACPI_FAILURE(status))
+			goto out;
+		have_fan = true;
+		if (mode != LINUWU_SENSE_FAN_MODE_TURBO)
+			enabled = false;
+	}
+
+	if (quirks->gpu_fans > 0) {
+		status = linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_GPU,
+						   &mode);
+		if (ACPI_FAILURE(status))
+			goto out;
+		have_fan = true;
+		if (mode != LINUWU_SENSE_FAN_MODE_TURBO)
+			enabled = false;
+	}
+
+	status = have_fan ? AE_OK : AE_BAD_PARAMETER;
+out:
+	mutex_unlock(&acer->lock);
+	if (ACPI_FAILURE(status))
+		return -EIO;
+
+	return sysfs_emit(buf, "%d\n", enabled ? 1 : 0);
+}
+
+static ssize_t predator_turbo_mode_store(struct device *dev,
+					 struct device_attribute *attr,
+					 const char *buf, size_t count)
+{
+	struct acer_wmi *acer = dev_get_drvdata(dev);
+	u8 val;
+	int err;
+
+	if (!acer_turbo_fan_supported(acer))
+		return -EOPNOTSUPP;
+
+	if (kstrtou8(buf, 10, &val))
+		return -EINVAL;
+	if (val > 1)
+		return -EINVAL;
+
+	mutex_lock(&acer->lock);
+	err = acer_set_turbo_fan_mode_locked(acer, val);
+	mutex_unlock(&acer->lock);
+	if (err)
+		return err;
 
 	return count;
 }
@@ -3591,24 +3685,50 @@ static struct device_attribute battery_limiter =
 	       predator_battery_limit_store);
 static struct device_attribute fan_speed = __ATTR(
 	fan_speed, 0644, predator_fan_speed_show, predator_fan_speed_store);
+static struct device_attribute turbo_mode = __ATTR(
+	turbo_mode, 0644, predator_turbo_mode_show, predator_turbo_mode_store);
 static struct device_attribute lcd_override =
 	__ATTR(lcd_override, 0644, predator_lcd_override_show,
 	       predator_lcd_override_store);
-static struct attribute *predator_sense_attrs[] = {
+static struct attribute *predator_sense_attrs[] = { &lcd_override.attr,
+						    &fan_speed.attr,
+						    &turbo_mode.attr,
+						    &battery_limiter.attr,
+						    &battery_calibration.attr,
+						    &usb_charging.attr,
+						    &backlight_timeout.attr,
+						    &boot_animation_sound.attr,
+						    NULL };
+
+static umode_t predator_sense_attr_is_visible(struct kobject *kobj,
+					      struct attribute *attr, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+	struct acer_wmi *acer = dev_get_drvdata(dev);
+
+	if (attr == &turbo_mode.attr &&
+	    (!acer || !acer_turbo_fan_supported(acer)))
+		return 0;
+
+	return attr->mode;
+}
+
+static struct attribute_group preadtor_sense_attr_group = {
+	.name = "predator_sense",
+	.attrs = predator_sense_attrs,
+	.is_visible = predator_sense_attr_is_visible,
+};
+
+static struct attribute *nitro_sense_v4_attrs[] = {
 	&lcd_override.attr,	    &fan_speed.attr,
 	&battery_limiter.attr,	    &battery_calibration.attr,
 	&usb_charging.attr,	    &backlight_timeout.attr,
 	&boot_animation_sound.attr, NULL
 };
 
-static struct attribute_group preadtor_sense_attr_group = {
-	.name = "predator_sense",
-	.attrs = predator_sense_attrs
-};
-
 static struct attribute_group nitro_sense_v4_attr_group = {
 	.name = "nitro_sense",
-	.attrs = predator_sense_attrs
+	.attrs = nitro_sense_v4_attrs
 };
 
 /* nitro sense attributes */
@@ -4189,6 +4309,15 @@ static int acer_platform_probe(struct platform_device *pdev)
 				return err;
 		}
 		acer_platform_profile_setup(acer);
+	}
+
+	if (has_cap(acer, ACER_CAP_TURBO_FAN)) {
+		mutex_lock(&acer->lock);
+		err = acer_set_turbo_fan_mode_locked(acer, false);
+		mutex_unlock(&acer->lock);
+		if (err && err != -EOPNOTSUPP)
+			pr_warn("Unable to initialize gaming fan mode: %d\n",
+				err);
 	}
 
 	if (has_cap(acer, ACER_CAP_PREDATOR_SENSE)) {
