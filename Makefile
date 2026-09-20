@@ -5,6 +5,7 @@ linuwu_sense-y := \
 	src/linuwu_sense_wmi.o \
 	src/linuwu_sense_hwmon.o \
 	src/linuwu_sense_gaming.o \
+	src/linuwu_sense_profile.o \
 	src/linuwu_sense_quirks.o
 
 KVER  ?= $(shell uname -r)
