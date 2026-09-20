@@ -21,7 +21,6 @@
 #include <linux/device.h>
 #include <linux/dmi.h>
 #include <linux/fs.h>
-#include <linux/hwmon.h>
 #include <linux/i8042.h>
 #include <linux/init.h>
 #include <linux/input.h>
@@ -37,11 +36,11 @@
 #include <linux/slab.h>
 #include <linux/types.h>
 #include <linux/unaligned.h>
-#include <linux/units.h>
 #include <linux/wmi.h>
 #include <linux/workqueue.h>
 
 #include "linuwu_sense_fan.h"
+#include "linuwu_sense_hwmon.h"
 
 MODULE_AUTHOR("Carlos Corbacho");
 MODULE_DESCRIPTION("Acer Laptop WMI Extras Driver");
@@ -466,8 +465,6 @@ struct acer_wmi {
 	int cpu_fan_speed;
 	int gpu_fan_speed;
 	struct kb_state current_kb_state;
-
-	u64 supported_sensors;
 
 	struct delayed_work rfkill_work;
 };
@@ -2371,6 +2368,11 @@ static const struct platform_profile_ops acer_predator_v4_platform_profile_ops =
 	.profile_set = acer_predator_v4_platform_profile_set,
 };
 
+int acer_wmi_get_sys_info(struct acer_wmi *acer, u32 command, u64 *out)
+{
+   return WMID_gaming_get_sys_info(acer, command, out);
+}
+
 static int acer_platform_profile_setup(struct acer_wmi *acer)
 {
 	const int max_retries = 10;
@@ -2975,7 +2977,6 @@ static u32 get_wmid_devices(struct acer_wmi *acer)
 	return devices;
 }
 
-static int acer_wmi_hwmon_init(struct acer_wmi *acer);
 static void acer_wmi_debugfs_init(struct acer_wmi *acer);
 
 /*
@@ -4348,7 +4349,7 @@ static int acer_platform_probe(struct platform_device *pdev)
 	}
 
 	if (has_cap(acer, ACER_CAP_FAN_SPEED_READ)) {
-		err = acer_wmi_hwmon_init(acer);
+		err = acer_wmi_hwmon_init(acer, acer->dev);
 		if (err)
 			return err;
 	}
@@ -4534,127 +4535,6 @@ static void acer_wmi_debugfs_init(struct acer_wmi *acer)
 				       acer);
 	if (err)
 		dev_warn(acer->dev, "Unable to register debugfs cleanup\n");
-}
-
-static const enum acer_wmi_predator_v4_sensor_id
-	acer_wmi_temp_channel_to_sensor_id[] = {
-		[0] = ACER_WMID_SENSOR_CPU_TEMPERATURE,
-		[1] = ACER_WMID_SENSOR_GPU_TEMPERATURE,
-		[2] = ACER_WMID_SENSOR_EXTERNAL_TEMPERATURE_2,
-	};
-
-static const enum acer_wmi_predator_v4_sensor_id
-	acer_wmi_fan_channel_to_sensor_id[] = {
-		[0] = ACER_WMID_SENSOR_CPU_FAN_SPEED,
-		[1] = ACER_WMID_SENSOR_GPU_FAN_SPEED,
-	};
-
-static umode_t acer_wmi_hwmon_is_visible(const void *data,
-					 enum hwmon_sensor_types type, u32 attr,
-					 int channel)
-{
-	enum acer_wmi_predator_v4_sensor_id sensor_id;
-	const struct acer_wmi *acer = data;
-
-	switch (type) {
-	case hwmon_temp:
-		sensor_id = acer_wmi_temp_channel_to_sensor_id[channel];
-		break;
-	case hwmon_fan:
-		sensor_id = acer_wmi_fan_channel_to_sensor_id[channel];
-		break;
-	default:
-		return 0;
-	}
-
-	if (acer->supported_sensors & BIT(sensor_id - 1))
-		return 0444;
-
-	return 0;
-}
-
-static int acer_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
-			       u32 attr, int channel, long *val)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	u64 command = ACER_WMID_CMD_GET_PREDATOR_V4_SENSOR_READING;
-	u64 result;
-	int ret;
-
-	if (!acer)
-		return -ENODEV;
-
-	switch (type) {
-	case hwmon_temp:
-		command |=
-			FIELD_PREP(ACER_PREDATOR_V4_SENSOR_INDEX_BIT_MASK,
-				   acer_wmi_temp_channel_to_sensor_id[channel]);
-
-		ret = WMID_gaming_get_sys_info(acer, command, &result);
-		if (ret < 0)
-			return ret;
-
-		result = FIELD_GET(ACER_PREDATOR_V4_SENSOR_READING_BIT_MASK,
-				   result);
-		*val = result * MILLIDEGREE_PER_DEGREE;
-		return 0;
-	case hwmon_fan:
-		command |=
-			FIELD_PREP(ACER_PREDATOR_V4_SENSOR_INDEX_BIT_MASK,
-				   acer_wmi_fan_channel_to_sensor_id[channel]);
-
-		ret = WMID_gaming_get_sys_info(acer, command, &result);
-		if (ret < 0)
-			return ret;
-
-		*val = FIELD_GET(ACER_PREDATOR_V4_SENSOR_READING_BIT_MASK,
-				 result);
-		return 0;
-	default:
-		return -EOPNOTSUPP;
-	}
-}
-
-static const struct hwmon_channel_info *const acer_wmi_hwmon_info[] = {
-	HWMON_CHANNEL_INFO(temp, HWMON_T_INPUT, HWMON_T_INPUT, HWMON_T_INPUT),
-	HWMON_CHANNEL_INFO(fan, HWMON_F_INPUT, HWMON_F_INPUT), NULL
-};
-
-static const struct hwmon_ops acer_wmi_hwmon_ops = {
-	.read = acer_wmi_hwmon_read,
-	.is_visible = acer_wmi_hwmon_is_visible,
-};
-
-static const struct hwmon_chip_info acer_wmi_hwmon_chip_info = {
-	.ops = &acer_wmi_hwmon_ops,
-	.info = acer_wmi_hwmon_info,
-};
-
-static int acer_wmi_hwmon_init(struct acer_wmi *acer)
-{
-	struct device *hwmon;
-	u64 result;
-	int ret;
-
-	ret = WMID_gaming_get_sys_info(
-		acer, ACER_WMID_CMD_GET_PREDATOR_V4_SUPPORTED_SENSORS, &result);
-	if (ret < 0)
-		return ret;
-
-	/* Return early if no sensors are available */
-	acer->supported_sensors =
-		FIELD_GET(ACER_PREDATOR_V4_SUPPORTED_SENSORS_BIT_MASK, result);
-	if (!acer->supported_sensors)
-		return 0;
-
-	hwmon = devm_hwmon_device_register_with_info(
-		acer->dev, "acer", acer, &acer_wmi_hwmon_chip_info, NULL);
-	if (IS_ERR(hwmon)) {
-		dev_err(acer->dev, "Could not register acer hwmon device\n");
-		return PTR_ERR(hwmon);
-	}
-
-	return 0;
 }
 
 /*
