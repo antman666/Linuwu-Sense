@@ -3,7 +3,8 @@ linuwu_sense-y := \
 	src/linuwu_sense.o \
 	src/linuwu_sense_fan.o \
 	src/linuwu_sense_wmi.o \
-	src/linuwu_sense_hwmon.o
+	src/linuwu_sense_hwmon.o \
+	src/linuwu_sense_quirks.o
 
 KVER  ?= $(shell uname -r)
 KDIR  := /lib/modules/$(KVER)/build

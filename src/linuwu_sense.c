@@ -39,8 +39,10 @@
 #include <linux/wmi.h>
 #include <linux/workqueue.h>
 
+#include "linuwu_sense.h"
 #include "linuwu_sense_fan.h"
 #include "linuwu_sense_hwmon.h"
+#include "linuwu_sense_quirks.h"
 
 MODULE_AUTHOR("Carlos Corbacho");
 MODULE_DESCRIPTION("Acer Laptop WMI Extras Driver");
@@ -273,23 +275,6 @@ struct hotkey_function_type_aa {
 } __packed;
 
 /*
- * Interface capability flags
- */
-#define ACER_CAP_MAILLED BIT(0)
-#define ACER_CAP_WIRELESS BIT(1)
-#define ACER_CAP_BLUETOOTH BIT(2)
-#define ACER_CAP_BRIGHTNESS BIT(3)
-#define ACER_CAP_THREEG BIT(4)
-#define ACER_CAP_SET_FUNCTION_MODE BIT(5)
-#define ACER_CAP_KBD_DOCK BIT(6)
-#define ACER_CAP_TURBO_FAN BIT(9)
-#define ACER_CAP_PLATFORM_PROFILE BIT(10)
-#define ACER_CAP_FAN_SPEED_READ BIT(11)
-#define ACER_CAP_PREDATOR_SENSE BIT(12)
-#define ACER_CAP_NITRO_SENSE BIT(13)
-#define ACER_CAP_NITRO_SENSE_V4 BIT(14)
-
-/*
  * Interface type flags
  */
 enum interface_flags {
@@ -304,81 +289,19 @@ static int max_brightness = 0xF;
 static int mailled = -1;
 static int brightness = -1;
 static int threeg = -1;
-static int force_series;
-static int force_caps = -1;
 static bool ec_raw_mode;
 static bool has_type_aa;
 static u16 commun_func_bitmap;
 static u8 commun_fn_key_number;
-static bool predator_v4;
-static bool nitro_v4;
 
 module_param(mailled, int, 0444);
 module_param(brightness, int, 0444);
 module_param(threeg, int, 0444);
-module_param(force_series, int, 0444);
-module_param(force_caps, int, 0444);
 module_param(ec_raw_mode, bool, 0444);
-module_param(predator_v4, bool, 0444);
-module_param(nitro_v4, bool, 0444);
 MODULE_PARM_DESC(mailled, "Set initial state of Mail LED");
 MODULE_PARM_DESC(brightness, "Set initial LCD backlight brightness");
 MODULE_PARM_DESC(threeg, "Set initial state of 3G hardware");
-MODULE_PARM_DESC(force_series, "Force a different laptop series");
-MODULE_PARM_DESC(force_caps, "Force the capability bitmask to this value");
 MODULE_PARM_DESC(ec_raw_mode, "Enable EC raw mode");
-MODULE_PARM_DESC(
-	predator_v4,
-	"Enable features for predator laptops that use predator sense v4");
-MODULE_PARM_DESC(nitro_v4,
-		 "Enable features for nitro laptops that use nitro sense v4");
-
-struct acer_data {
-	int mailled;
-	int threeg;
-	int brightness;
-};
-
-struct acer_debug {
-	struct dentry *root;
-	u32 wmid_devices;
-};
-
-struct per_zone_color {
-	u64 zone1, zone2, zone3, zone4;
-	int brightness;
-} __packed;
-
-struct kb_state {
-	u8 per_zone;
-	u8 mode;
-	u8 speed;
-	u8 brightness;
-	u8 direction;
-	u8 red;
-	u8 green;
-	u8 blue;
-	struct per_zone_color zones;
-} __packed;
-
-/*
- * The WMI devices used by this driver. Acer firmware spreads the different
- * parts of the embedded controller interface over several WMI devices, which
- * are all children of the same WMI bus device.
- */
-enum acer_wmi_guid {
-	ACER_WMI_GUID_AMW0, /* AMW0_GUID1 */
-	ACER_WMI_GUID_AMW0_2, /* AMW0_GUID2 */
-	ACER_WMI_GUID_WMID, /* WMID_GUID1 */
-	ACER_WMI_GUID_WMID_DATA, /* WMID_GUID2 */
-	ACER_WMI_GUID_WMID_APGE, /* WMID_GUID3 */
-	ACER_WMI_GUID_WMID_GAMING, /* WMID_GUID4 */
-	ACER_WMI_GUID_WMID_BATTERY, /* WMID_GUID5 */
-	ACER_WMI_GUID_EVENT, /* ACERWMID_EVENT_GUID */
-	ACER_WMI_GUID_COUNT,
-};
-
-struct acer_wmi;
 
 /*
  * Per WMI device state. Every matching WMI device gets its own instance of
@@ -392,84 +315,6 @@ struct acer_wmi_wdev {
 };
 
 /*
- * Per physical device driver state. This structure is shared by all WMI
- * devices belonging to the same WMI bus device. It is allocated by devres on
- * the WMI bus device, so the memory outlives every WMI device and is released
- * only when the WMI bus device itself goes away. The platform device keeps a
- * pointer to it via platform_set_drvdata().
- */
-struct acer_wmi {
-	struct device *dev; /* the platform device */
-	struct platform_device *pdev;
-	struct device *parent; /* the WMI bus device */
-	struct list_head node;
-	struct list_head wdev_list;
-
-	struct wmi_device *wdevs[ACER_WMI_GUID_COUNT];
-
-	/*
-	 * Number of WMI devices of this instance that are currently bound to
-	 * the driver, plus the instance setup state. All three fields are
-	 * protected by acer_wmi_instances_lock.
-	 */
-	unsigned int wdev_count;
-	bool setup_done;
-	/* Last setup attempt failed; cleared when a new WMI probe joins. */
-	bool setup_failed;
-
-	/* The WMI interface type */
-	u32 type;
-
-	/* The capabilities this interface provides */
-	u32 capability;
-
-	/* Private data for the current interface */
-	struct acer_data data;
-
-	/* debugfs entries associated with this interface */
-	struct acer_debug debug;
-
-	/*
-	 * Protects the cached fan speed pair, keyboard state, power-source
-	 * state and thermal profile shared by the sysfs and WMI event paths.
-	 * May be held across ACPI/WMI operations, so it must stay a mutex.
-	 */
-	struct mutex lock;
-
-	/*
-	 * Serializes WMI event processing and prevents it from running while
-	 * the platform device is being torn down. Must be a mutex because the
-	 * notify path may sleep.
-	 */
-	struct mutex event_lock;
-	bool ready;
-
-	struct input_dev *input_dev;
-	struct input_dev *accel_dev;
-	acpi_handle gsensor_handle;
-
-	struct led_classdev mail_led;
-	struct backlight_device *backlight;
-
-	struct rfkill *wireless_rfkill;
-	struct rfkill *bluetooth_rfkill;
-	struct rfkill *threeg_rfkill;
-	bool rfkill_inited;
-
-	struct device *platform_profile_dev;
-	bool platform_profile_support;
-
-	bool on_ac;
-	u8 thermal_profile;
-
-	int cpu_fan_speed;
-	int gpu_fan_speed;
-	struct kb_state current_kb_state;
-
-	struct delayed_work rfkill_work;
-};
-
-/*
  * Registry of the driver states, one entry per WMI bus device. New entries
  * are created during WMI device probing and removed again once the last WMI
  * device of an instance is gone, or when the driver is unloaded.
@@ -478,29 +323,10 @@ static LIST_HEAD(acer_wmi_instances);
 static DEFINE_MUTEX(acer_wmi_instances_lock);
 static bool acer_wmi_shutting_down;
 
-/*
- * Embedded Controller quirks
- * Some laptops require us to directly access the EC to either enable or query
- * features that are not available through WMI.
- */
-
-struct quirk_entry {
-	u8 wireless;
-	u8 mailled;
-	s8 brightness;
-	u8 bluetooth;
-	u8 cpu_fans;
-	u8 gpu_fans;
-	u8 predator_v4;
-	u8 nitro_v4;
-	u8 nitro_sense;
-	u8 four_zone_kb;
-};
-
-static struct quirk_entry *quirks;
-
 static void set_quirks(struct acer_wmi *acer)
 {
+	const struct linuwu_sense_quirks *quirks = acer->quirks;
+
 	if (quirks->mailled)
 		acer->capability |= ACER_CAP_MAILLED;
 
@@ -536,496 +362,6 @@ static void set_quirks(struct acer_wmi *acer)
 				    ACER_CAP_NITRO_SENSE_V4;
 }
 
-static int __init dmi_matched(const struct dmi_system_id *dmi)
-{
-	quirks = dmi->driver_data;
-	return 1;
-}
-
-static int __init set_force_caps(const struct dmi_system_id *dmi)
-{
-	if (force_caps == -1) {
-		force_caps = (uintptr_t)dmi->driver_data;
-		pr_info("Found %s, set force_caps to 0x%x\n", dmi->ident,
-			force_caps);
-	}
-	return 1;
-}
-
-static struct quirk_entry quirk_unknown = {};
-
-static struct quirk_entry quirk_acer_aspire_1520 = {
-	.brightness = -1,
-};
-
-static struct quirk_entry quirk_acer_travelmate_2490 = {
-	.mailled = 1,
-};
-
-static struct quirk_entry quirk_acer_predator_ph315_53 = {
-	.cpu_fans = 1,
-	.gpu_fans = 1,
-};
-
-static struct quirk_entry quirk_acer_predator_phn16_71 = {
-	.cpu_fans = 1,
-	.gpu_fans = 1,
-	.predator_v4 = 1,
-	.four_zone_kb = 1,
-};
-
-static struct quirk_entry quirk_acer_predator_phn16_72 = {
-	.predator_v4 = 1,
-	.four_zone_kb = 1,
-};
-
-static struct quirk_entry quirk_acer_nitro_an16_41 = {
-	.nitro_v4 = 1,
-	.four_zone_kb = 1,
-};
-
-static struct quirk_entry quirk_acer_nitro_an16_42 = {
-	.nitro_v4 = 1,
-	.four_zone_kb = 1,
-};
-
-static struct quirk_entry quirk_acer_nitro_anv16_41 = {
-	.nitro_v4 = 1,
-	.four_zone_kb = 0,
-};
-
-static struct quirk_entry quirk_acer_nitro_an16_43 = {
-	.nitro_v4 = 1,
-	.four_zone_kb = 1,
-};
-
-static struct quirk_entry quirk_acer_nitro_legacy = {
-	.nitro_sense = 2,
-};
-
-static struct quirk_entry quirk_acer_nitro_an515_58 = {
-	.nitro_v4 = 1,
-	.four_zone_kb = 1,
-};
-
-static struct quirk_entry quirk_acer_nitro = {
-	.nitro_sense = 1,
-};
-
-static struct quirk_entry quirk_acer_predator_v4 = {
-	.predator_v4 = 1,
-};
-
-/* This AMW0 laptop has no bluetooth */
-static struct quirk_entry quirk_medion_md_98300 = {
-	.wireless = 1,
-};
-
-static struct quirk_entry quirk_fujitsu_amilo_li_1718 = {
-	.wireless = 2,
-};
-
-static struct quirk_entry quirk_lenovo_ideapad_s205 = {
-	.wireless = 3,
-};
-
-static struct quirk_entry quirk_acer_nitro_v4 = {
-	.nitro_v4 = 1,
-};
-
-/* The Aspire One has a dummy ACPI-WMI interface - disable it */
-static const struct dmi_system_id acer_blacklist[] __initconst = {
-     {
-         .ident = "Acer Aspire One (SSD)",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "AOA110"),
-         },
-     },
-     {
-         .ident = "Acer Aspire One (HDD)",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "AOA150"),
-         },
-     },
-     {}
- };
-
-static const struct dmi_system_id amw0_whitelist[] = {
-     {
-         .ident = "Acer",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-         },
-     },
-     {
-         .ident = "Gateway",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Gateway"),
-         },
-     },
-     {
-         .ident = "Packard Bell",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Packard Bell"),
-         },
-     },
-     {}
- };
-
-/*
- * This quirk table is only for Acer/Gateway/Packard Bell family
- * that those machines are supported by acer-wmi driver.
- */
-static const struct dmi_system_id acer_quirks[] __initconst = {
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Nitro AN16-43",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Nitro AN16-43"),
-         },
-         .driver_data = &quirk_acer_nitro_an16_43,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Nitro AN16-42",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Nitro AN16-42"),
-         },
-         .driver_data = &quirk_acer_nitro_an16_42,
-     },
-     {
-        .callback = dmi_matched,
-        .ident = "Acer Nitro AN515-58",
-        .matches = {
-            DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "Nitro AN515-58"),
-        },
-        .driver_data = &quirk_acer_nitro_an515_58,
-    },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Nitro AN16-41",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Nitro AN16-41"),
-         },
-         .driver_data = &quirk_acer_nitro_an16_41,
-     },     
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Nitro ANV16-41",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Nitro ANV16-41"),
-         },
-         .driver_data = &quirk_acer_nitro_anv16_41,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Nitro ANV15-41",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Nitro ANV15-41"),
-         },
-         .driver_data = &quirk_acer_nitro,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Nitro ANV15-51",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Nitro ANV15-51"),
-         },
-         .driver_data = &quirk_acer_nitro,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Nitro AN515-55",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Nitro AN515-55"),
-         },
-         .driver_data = &quirk_acer_nitro_legacy,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 1360",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 1360"),
-         },
-         .driver_data = &quirk_acer_aspire_1520,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 1520",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 1520"),
-         },
-         .driver_data = &quirk_acer_aspire_1520,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 3100",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 3100"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 3610",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 3610"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 5100",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 5100"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 5610",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 5610"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 5630",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 5630"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 5650",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 5650"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 5680",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 5680"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Aspire 9110",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire 9110"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer TravelMate 2490",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "TravelMate 2490"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer TravelMate 4200",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "TravelMate 4200"),
-         },
-         .driver_data = &quirk_acer_travelmate_2490,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Predator PH315-53",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Predator PH315-53"),
-         },
-         .driver_data = &quirk_acer_predator_ph315_53,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Predator PHN16-71",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Predator PHN16-71"),
-         },
-         .driver_data = &quirk_acer_predator_phn16_71,
-     },
-     {
-        .callback = dmi_matched,
-        .ident = "Acer Predator PHN16-72",
-        .matches = {
-            DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-            DMI_MATCH(DMI_PRODUCT_NAME, "Predator PHN16-72"),
-        },
-        .driver_data = &quirk_acer_predator_phn16_72,
-    },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Predator PH16-71",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Predator PH16-71"),
-         },
-         .driver_data = &quirk_acer_predator_v4,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Predator PH18-71",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Predator PH18-71"),
-         },
-         .driver_data = &quirk_acer_predator_v4,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Acer Predator PTX17-71",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Predator PTX17-71"),
-         },
-         .driver_data = &quirk_acer_predator_v4,
-     },
-     {
-         .callback = set_force_caps,
-         .ident = "Acer Aspire Switch 10E SW3-016",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire SW3-016"),
-         },
-         .driver_data = (void *)ACER_CAP_KBD_DOCK,
-     },
-     {
-         .callback = set_force_caps,
-         .ident = "Acer Aspire Switch 10 SW5-012",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Aspire SW5-012"),
-         },
-         .driver_data = (void *)ACER_CAP_KBD_DOCK,
-     },
-     {
-         .callback = set_force_caps,
-         .ident = "Acer Aspire Switch V 10 SW5-017",
-         .matches = {
-             DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "SW5-017"),
-         },
-         .driver_data = (void *)ACER_CAP_KBD_DOCK,
-     },
-     {
-         .callback = set_force_caps,
-         .ident = "Acer One 10 (S1003)",
-         .matches = {
-             DMI_EXACT_MATCH(DMI_SYS_VENDOR, "Acer"),
-             DMI_EXACT_MATCH(DMI_PRODUCT_NAME, "One S1003"),
-         },
-         .driver_data = (void *)ACER_CAP_KBD_DOCK,
-     },
-     {}
- };
-
-/*
- * This quirk list is for those non-acer machines that have AMW0_GUID1
- * but supported by acer-wmi in past days. Keeping this quirk list here
- * is only for backward compatible. Please do not add new machine to
- * here anymore. Those non-acer machines should be supported by
- * appropriate wmi drivers.
- */
-static const struct dmi_system_id non_acer_quirks[] __initconst = {
-     {
-         .callback = dmi_matched,
-         .ident = "Fujitsu Siemens Amilo Li 1718",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "FUJITSU SIEMENS"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "AMILO Li 1718"),
-         },
-         .driver_data = &quirk_fujitsu_amilo_li_1718,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Medion MD 98300",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "MEDION"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "WAM2030"),
-         },
-         .driver_data = &quirk_medion_md_98300,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Lenovo Ideapad S205",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "10382LG"),
-         },
-         .driver_data = &quirk_lenovo_ideapad_s205,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Lenovo Ideapad S205 (Brazos)",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "Brazos"),
-         },
-         .driver_data = &quirk_lenovo_ideapad_s205,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Lenovo 3000 N200",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "0687A31"),
-         },
-         .driver_data = &quirk_fujitsu_amilo_li_1718,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Lenovo Ideapad S205-10382JG",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "10382JG"),
-         },
-         .driver_data = &quirk_lenovo_ideapad_s205,
-     },
-     {
-         .callback = dmi_matched,
-         .ident = "Lenovo Ideapad S205-1038DPG",
-         .matches = {
-             DMI_MATCH(DMI_SYS_VENDOR, "LENOVO"),
-             DMI_MATCH(DMI_PRODUCT_NAME, "1038DPG"),
-         },
-         .driver_data = &quirk_lenovo_ideapad_s205,
-     },
-     {}
- };
-
 enum acer_predator_v4_thermal_profile {
 	ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET = 0x00,
 	ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED = 0x01,
@@ -1033,24 +369,6 @@ enum acer_predator_v4_thermal_profile {
 	ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO = 0x05,
 	ACER_PREDATOR_V4_THERMAL_PROFILE_ECO = 0x06,
 };
-
-/* Find which quirks are needed for a particular vendor/ model pair */
-static void __init find_quirks(void)
-{
-	if (predator_v4) {
-		quirks = &quirk_acer_predator_v4;
-	} else if (nitro_v4) {
-		quirks = &quirk_acer_nitro_v4;
-	} else if (!force_series) {
-		dmi_check_system(acer_quirks);
-		dmi_check_system(non_acer_quirks);
-	} else if (force_series == 2490) {
-		quirks = &quirk_acer_travelmate_2490;
-	}
-
-	if (quirks == NULL)
-		quirks = &quirk_unknown;
-}
 
 /*
  * General interface convenience methods
@@ -1114,7 +432,7 @@ static acpi_status AMW0_get_u32(struct acer_wmi *acer, u32 *value, u32 cap)
 
 	switch (cap) {
 	case ACER_CAP_MAILLED:
-		switch (quirks->mailled) {
+		switch (acer->quirks->mailled) {
 		default:
 			err = ec_read(0xA, &result);
 			if (err)
@@ -1124,7 +442,7 @@ static acpi_status AMW0_get_u32(struct acer_wmi *acer, u32 *value, u32 cap)
 		}
 		break;
 	case ACER_CAP_WIRELESS:
-		switch (quirks->wireless) {
+		switch (acer->quirks->wireless) {
 		case 1:
 			err = ec_read(0x7B, &result);
 			if (err)
@@ -1152,7 +470,7 @@ static acpi_status AMW0_get_u32(struct acer_wmi *acer, u32 *value, u32 cap)
 		}
 		break;
 	case ACER_CAP_BLUETOOTH:
-		switch (quirks->bluetooth) {
+		switch (acer->quirks->bluetooth) {
 		default:
 			err = ec_read(0xA, &result);
 			if (err)
@@ -1162,7 +480,7 @@ static acpi_status AMW0_get_u32(struct acer_wmi *acer, u32 *value, u32 cap)
 		}
 		break;
 	case ACER_CAP_BRIGHTNESS:
-		switch (quirks->brightness) {
+		switch (acer->quirks->brightness) {
 		default:
 			err = ec_read(0x83, &result);
 			if (err)
@@ -1205,7 +523,7 @@ static acpi_status AMW0_set_u32(struct acer_wmi *acer, u32 value, u32 cap)
 	case ACER_CAP_BRIGHTNESS:
 		if (value > max_brightness)
 			return AE_BAD_PARAMETER;
-		switch (quirks->brightness) {
+		switch (acer->quirks->brightness) {
 		default:
 			if (ec_write(0x83, value))
 				return AE_ERROR;
@@ -1268,7 +586,7 @@ static int AMW0_set_capabilities(struct acer_wmi *acer)
      * work.
      */
 	if (acer->wdevs[ACER_WMI_GUID_AMW0_2]) {
-		if ((quirks != &quirk_unknown) ||
+		if (!linuwu_sense_quirks_is_unknown(acer->quirks) ||
 		    !AMW0_set_cap_acpi_check_device())
 			acer->capability |= ACER_CAP_WIRELESS;
 		return 0;
@@ -1302,7 +620,7 @@ static int AMW0_set_capabilities(struct acer_wmi *acer)
      * appear to use the same EC register for brightness, even if they
      * differ for wireless, etc
      */
-	if (quirks->brightness >= 0)
+	if (acer->quirks->brightness >= 0)
 		acer->capability |= ACER_CAP_BRIGHTNESS;
 
 	return 0;
@@ -1355,7 +673,7 @@ static acpi_status WMID_get_u32(struct acer_wmi *acer, u32 *value, u32 cap)
 		method_id = ACER_WMID_GET_THREEG_METHODID;
 		break;
 	case ACER_CAP_MAILLED:
-		if (quirks->mailled == 1) {
+		if (acer->quirks->mailled == 1) {
 			ec_read(0x9f, &tmp);
 			*value = tmp & 0x1;
 			return 0;
@@ -1401,7 +719,7 @@ static acpi_status WMID_set_u32(struct acer_wmi *acer, u32 value, u32 cap)
 	case ACER_CAP_MAILLED:
 		if (value > 1)
 			return AE_BAD_PARAMETER;
-		if (quirks->mailled == 1) {
+		if (acer->quirks->mailled == 1) {
 			param = value ? 0x92 : 0x93;
 			i8042_lock_chip();
 			i8042_command(&param, 0x1059);
@@ -2185,7 +1503,7 @@ static int acer_apply_thermal_profile_locked(struct acer_wmi *acer, u8 profile)
 static bool acer_turbo_fan_supported(struct acer_wmi *acer)
 {
 	return has_cap(acer, ACER_CAP_TURBO_FAN) &&
-	       (quirks->cpu_fans > 0 || quirks->gpu_fans > 0);
+	       (acer->quirks->cpu_fans > 0 || acer->quirks->gpu_fans > 0);
 }
 
 static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
@@ -2199,8 +1517,8 @@ static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
 	if (!wdev)
 		return -ENODEV;
 
-	status = linuwu_sense_fan_set_mode(wdev, quirks->cpu_fans > 0,
-					   quirks->gpu_fans > 0,
+	status = linuwu_sense_fan_set_mode(wdev, acer->quirks->cpu_fans > 0,
+					   acer->quirks->gpu_fans > 0,
 					   turbo ? LINUWU_SENSE_FAN_MODE_TURBO :
 						   LINUWU_SENSE_FAN_MODE_AUTO);
 
@@ -2261,7 +1579,7 @@ acer_predator_v4_platform_profile_set(struct device *dev,
 
 	mutex_lock(&acer->lock);
 
-	if (!quirks->predator_v4) {
+	if (!acer->quirks->predator_v4) {
 		tp = acer_platform_profile_to_thermal_profile(profile);
 		err = acer_apply_thermal_profile_locked(acer, tp);
 		goto out;
@@ -2337,7 +1655,7 @@ static int acer_thermal_profile_change(struct acer_wmi *acer)
 	u8 next;
 	int err;
 
-	if (!quirks->predator_v4)
+	if (!acer->quirks->predator_v4)
 		return 0;
 
 	mutex_lock(&acer->lock);
@@ -2378,7 +1696,7 @@ static int acer_platform_profile_setup(struct acer_wmi *acer)
 	const int max_retries = 10;
 	int delay_ms = 100;
 
-	if (!quirks->predator_v4 && !quirks->nitro_sense && !quirks->nitro_v4)
+	if (!acer->quirks->predator_v4 && !acer->quirks->nitro_sense && !acer->quirks->nitro_v4)
 		return 0;
 
 	for (int attempt = 1; attempt <= max_retries; attempt++) {
@@ -2503,7 +1821,7 @@ static void acer_rfkill_update(struct work_struct *work)
 	if (has_cap(acer, ACER_CAP_WIRELESS)) {
 		status = get_u32(acer, &state, ACER_CAP_WIRELESS);
 		if (ACPI_SUCCESS(status)) {
-			if (quirks->wireless == 3)
+			if (acer->quirks->wireless == 3)
 				rfkill_set_hw_state(acer->wireless_rfkill,
 						    !state);
 			else
@@ -2738,7 +2056,7 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 			acer_thermal_profile_change(acer);
 		break;
 	case WMID_AC_EVENT:
-		if (quirks->predator_v4 &&
+		if (acer->quirks->predator_v4 &&
 		    has_cap(acer, ACER_CAP_PLATFORM_PROFILE)) {
 			bool old_on_ac, new_on_ac;
 			u8 target;
@@ -3252,8 +2570,8 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 
 	if (t_cpu_fan_speed == 100 && t_gpu_fan_speed == 100) {
 		pr_info("MAX FAN MODE!\n");
-		status = linuwu_sense_fan_set_mode(wdev, quirks->cpu_fans > 0,
-						   quirks->gpu_fans > 0,
+		status = linuwu_sense_fan_set_mode(wdev, acer->quirks->cpu_fans > 0,
+						   acer->quirks->gpu_fans > 0,
 						   LINUWU_SENSE_FAN_MODE_TURBO);
 		if (ACPI_FAILURE(status)) {
 			pr_err("Error setting fan speed status: %s\n",
@@ -3262,8 +2580,8 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 		}
 	} else if (t_cpu_fan_speed == 0 && t_gpu_fan_speed == 0) {
 		pr_info("AUTO FAN MODE!\n");
-		status = linuwu_sense_fan_set_mode(wdev, quirks->cpu_fans > 0,
-						   quirks->gpu_fans > 0,
+		status = linuwu_sense_fan_set_mode(wdev, acer->quirks->cpu_fans > 0,
+						   acer->quirks->gpu_fans > 0,
 						   LINUWU_SENSE_FAN_MODE_AUTO);
 		if (ACPI_FAILURE(status)) {
 			pr_err("Error setting fan speed status: %s\n",
@@ -3274,7 +2592,7 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 		if (t_cpu_fan_speed == 0) {
 			pr_info("CUSTOM FAN MODE (GPU)\n");
 			status = linuwu_sense_fan_set_mode(
-				wdev, quirks->cpu_fans > 0, false,
+				wdev, acer->quirks->cpu_fans > 0, false,
 				LINUWU_SENSE_FAN_MODE_AUTO);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
@@ -3283,7 +2601,7 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 			}
 
 			status = linuwu_sense_fan_set_mode(
-				wdev, false, quirks->gpu_fans > 0,
+				wdev, false, acer->quirks->gpu_fans > 0,
 				LINUWU_SENSE_FAN_MODE_CUSTOM);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
@@ -3301,7 +2619,7 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 		} else if (t_gpu_fan_speed == 0) {
 			pr_info("CUSTOM FAN MODE (CPU)\n");
 			status = linuwu_sense_fan_set_mode(
-				wdev, false, quirks->gpu_fans > 0,
+				wdev, false, acer->quirks->gpu_fans > 0,
 				LINUWU_SENSE_FAN_MODE_AUTO);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
@@ -3310,7 +2628,7 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 			}
 
 			status = linuwu_sense_fan_set_mode(
-				wdev, quirks->cpu_fans > 0, false,
+				wdev, acer->quirks->cpu_fans > 0, false,
 				LINUWU_SENSE_FAN_MODE_CUSTOM);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
@@ -3328,8 +2646,8 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 		} else {
 			pr_info("CUSTOM FAN MODE (MIXED)!\n");
 			status = linuwu_sense_fan_set_mode(
-				wdev, quirks->cpu_fans > 0,
-				quirks->gpu_fans > 0,
+				wdev, acer->quirks->cpu_fans > 0,
+				acer->quirks->gpu_fans > 0,
 				LINUWU_SENSE_FAN_MODE_CUSTOM);
 			if (ACPI_FAILURE(status)) {
 				pr_err("Error setting fan speed status: %s\n",
@@ -3445,7 +2763,7 @@ static ssize_t predator_turbo_mode_show(struct device *dev,
 		goto out;
 	}
 
-	if (quirks->cpu_fans > 0) {
+	if (acer->quirks->cpu_fans > 0) {
 		status = linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_CPU,
 						   &mode);
 		if (ACPI_FAILURE(status))
@@ -3455,7 +2773,7 @@ static ssize_t predator_turbo_mode_show(struct device *dev,
 			enabled = false;
 	}
 
-	if (quirks->gpu_fans > 0) {
+	if (acer->quirks->gpu_fans > 0) {
 		status = linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_GPU,
 						   &mode);
 		if (ACPI_FAILURE(status))
@@ -4304,7 +3622,7 @@ static int acer_platform_probe(struct platform_device *pdev)
 		return err;
 
 	if (has_cap(acer, ACER_CAP_PLATFORM_PROFILE)) {
-		if (quirks->predator_v4) {
+		if (acer->quirks->predator_v4) {
 			err = acer_thermal_profile_init(acer);
 			if (err)
 				return err;
@@ -4340,7 +3658,7 @@ static int acer_platform_probe(struct platform_device *pdev)
 			return err;
 	}
 
-	if (quirks->four_zone_kb) {
+	if (acer->quirks->four_zone_kb) {
 		err = devm_device_add_group(&pdev->dev,
 					    &four_zoned_kb_attr_group);
 		if (err)
@@ -4383,7 +3701,7 @@ static void acer_platform_remove(struct platform_device *pdev)
 	acer->ready = false;
 	mutex_unlock(&acer->event_lock);
 
-	if (quirks->four_zone_kb)
+	if (acer->quirks->four_zone_kb)
 		four_zone_kb_state_save(acer);
 
 	/*
@@ -4584,6 +3902,7 @@ static struct acer_wmi *acer_wmi_instance_create(struct device *parent)
 		return NULL;
 
 	acer->parent = parent;
+	acer->quirks = linuwu_sense_quirks_match();
 	mutex_init(&acer->lock);
 	mutex_init(&acer->event_lock);
 	INIT_LIST_HEAD(&acer->node);
@@ -4805,6 +4124,7 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 {
 	struct acer_wmi *other;
 	int err, id = PLATFORM_DEVID_NONE;
+	int force_caps = linuwu_sense_quirks_force_caps();
 
 	lockdep_assert_held(&acer_wmi_instances_lock);
 
@@ -4820,7 +4140,8 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 	 * in the past quirk list.
 	 */
 	if (acer->wdevs[ACER_WMI_GUID_AMW0] &&
-	    !dmi_check_system(amw0_whitelist) && quirks == &quirk_unknown) {
+	    !linuwu_sense_quirks_amw0_whitelisted() &&
+	    linuwu_sense_quirks_is_unknown(acer->quirks)) {
 		pr_debug(
 			"Unsupported machine has AMW0_GUID1, unable to load\n");
 		return -ENODEV;
@@ -4963,12 +4284,10 @@ static int __init acer_wmi_init(void)
 
 	pr_info("Acer Laptop ACPI-WMI Extras\n");
 
-	if (dmi_check_system(acer_blacklist)) {
+	if (linuwu_sense_quirks_blacklisted()) {
 		pr_info("Blacklisted hardware detected - not loading\n");
 		return -ENODEV;
 	}
-
-	find_quirks();
 
 	mutex_lock(&acer_wmi_instances_lock);
 	acer_wmi_shutting_down = false;
