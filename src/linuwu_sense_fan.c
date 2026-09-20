@@ -1,12 +1,11 @@
 // SPDX-License-Identifier: GPL-2.0
 #include <linux/acpi.h>
 #include <linux/bitfield.h>
-#include <linux/slab.h>
 #include <linux/types.h>
-#include <linux/unaligned.h>
 #include <linux/wmi.h>
 
 #include "linuwu_sense_fan.h"
+#include "linuwu_sense_wmi.h"
 
 #define ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID 14
 #define ACER_WMID_GET_GAMING_FAN_BEHAVIOR_METHODID 15
@@ -29,53 +28,12 @@
 #define ACER_GAMING_FAN_SPEED_CPU_ID 0x01
 #define ACER_GAMING_FAN_SPEED_GPU_ID 0x04
 
-static acpi_status linuwu_sense_fan_invoke(struct wmi_device *wdev,
-					   u32 method_id, u64 input,
-					   u64 *result)
-{
-	struct wmi_buffer input_buf = {
-		.length = sizeof(input),
-		.data = &input,
-	};
-	struct wmi_buffer output_buf = {};
-	u64 value;
-	int err;
-
-	if (!wdev)
-		return AE_ERROR;
-
-	err = wmidev_invoke_method(wdev, 0, method_id, &input_buf, &output_buf,
-				   sizeof(value));
-	if (err) {
-		kfree(output_buf.data);
-		return AE_ERROR;
-	}
-
-	if (!output_buf.data)
-		return AE_ERROR;
-
-	if (output_buf.length >= sizeof(value))
-		value = get_unaligned_le64(output_buf.data);
-	else if (output_buf.length >= sizeof(u32))
-		value = get_unaligned_le32(output_buf.data);
-	else {
-		kfree(output_buf.data);
-		return AE_ERROR;
-	}
-	kfree(output_buf.data);
-
-	if (result)
-		*result = value;
-
-	return AE_OK;
-}
-
 acpi_status linuwu_sense_fan_set_behavior(struct wmi_device *wdev, u64 behavior)
 {
 	u64 result;
 	acpi_status status;
 
-	status = linuwu_sense_fan_invoke(
+	status = linuwu_sense_wmi_execute_u64(
 		wdev, ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID, behavior,
 		&result);
 	if (ACPI_FAILURE(status))
@@ -141,7 +99,7 @@ acpi_status linuwu_sense_fan_get_mode(struct wmi_device *wdev,
 		return AE_BAD_PARAMETER;
 	}
 
-	status = linuwu_sense_fan_invoke(
+	status = linuwu_sense_wmi_execute_u64(
 		wdev, ACER_WMID_GET_GAMING_FAN_BEHAVIOR_METHODID,
 		FIELD_PREP(ACER_GAMING_FAN_BEHAVIOR_ID_MASK, fan_bitmap),
 		&result);
@@ -192,7 +150,7 @@ acpi_status linuwu_sense_fan_set_speed(struct wmi_device *wdev,
 	input |= FIELD_PREP(ACER_GAMING_FAN_SPEED_ID_MASK, fan_id);
 	input |= FIELD_PREP(ACER_GAMING_FAN_SPEED_VALUE_MASK, percentage);
 
-	status = linuwu_sense_fan_invoke(
+	status = linuwu_sense_wmi_execute_u64(
 		wdev, ACER_WMID_SET_GAMING_FAN_SPEED_METHODID, input, &result);
 	if (ACPI_FAILURE(status))
 		return status;

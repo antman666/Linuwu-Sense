@@ -1,5 +1,8 @@
 obj-m := linuwu_sense.o
-linuwu_sense-y := src/linuwu_sense.o src/linuwu_sense_fan.o
+linuwu_sense-y := \
+	src/linuwu_sense.o \
+	src/linuwu_sense_fan.o \
+	src/linuwu_sense_wmi.o
 
 KVER  ?= $(shell uname -r)
 KDIR  := /lib/modules/$(KVER)/build
