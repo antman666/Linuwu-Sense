@@ -7,6 +7,7 @@
 #include <linux/slab.h>
 #include <linux/units.h>
 
+#include "linuwu_sense_gaming.h"
 #include "linuwu_sense_hwmon.h"
 
 #define ACER_WMID_CMD_GET_PREDATOR_V4_SUPPORTED_SENSORS 0x0000
@@ -83,7 +84,7 @@ static int acer_wmi_hwmon_read(struct device *dev,
 		command |=
 			FIELD_PREP(ACER_PREDATOR_V4_SENSOR_INDEX_BIT_MASK,
 				   acer_wmi_temp_channel_to_sensor_id[channel]);
-		ret = acer_wmi_get_sys_info(hwmon->acer, command, &result);
+		ret = linuwu_sense_gaming_get_sys_info(hwmon->acer, command, &result);
 		if (ret < 0)
 			return ret;
 
@@ -96,7 +97,7 @@ static int acer_wmi_hwmon_read(struct device *dev,
 			FIELD_PREP(ACER_PREDATOR_V4_SENSOR_INDEX_BIT_MASK,
 				   acer_wmi_fan_channel_to_sensor_id[channel]);
 
-		ret = acer_wmi_get_sys_info(hwmon->acer, command, &result);
+		ret = linuwu_sense_gaming_get_sys_info(hwmon->acer, command, &result);
 		if (ret < 0)
 			return ret;
 		*val = FIELD_GET(ACER_PREDATOR_V4_SENSOR_READING_BIT_MASK,
@@ -135,7 +136,7 @@ int acer_wmi_hwmon_init(struct acer_wmi *acer, struct device *dev)
 
 	hwmon_data->acer = acer;
 
-	ret = acer_wmi_get_sys_info(
+	ret = linuwu_sense_gaming_get_sys_info(
 		acer, ACER_WMID_CMD_GET_PREDATOR_V4_SUPPORTED_SENSORS, &result);
 	if (ret < 0)
 		return ret;

@@ -48,3 +48,62 @@ acpi_status linuwu_sense_wmi_execute_u64(struct wmi_device *wdev,
 
 	return AE_OK;
 }
+
+static int linuwu_sense_wmi_invoke_u64(struct wmi_device *wdev, u32 method_id,
+				       void *input, size_t input_len,
+				       size_t min_size, u64 *result)
+{
+	struct wmi_buffer input_buf = {
+		.length = input_len,
+		.data = input,
+	};
+	struct wmi_buffer output_buf = {};
+	u64 value;
+	int err;
+
+	if (!wdev)
+		return -ENODEV;
+
+	err = wmidev_invoke_method(wdev, 0, method_id, &input_buf, &output_buf,
+				   min_size);
+	if (err)
+		goto out;
+
+	if (!output_buf.data) {
+		err = -EIO;
+		goto out;
+	}
+
+	if (output_buf.length >= sizeof(value)) {
+		value = get_unaligned_le64(output_buf.data);
+	} else if (output_buf.length >= sizeof(u32)) {
+		value = get_unaligned_le32(output_buf.data);
+	} else {
+		err = -EIO;
+		goto out;
+	}
+
+	if (result)
+		*result = value;
+
+out:
+	kfree(output_buf.data);
+	return err;
+}
+
+acpi_status
+linuwu_sense_wmi_execute_u64_min_size(struct wmi_device *wdev, u32 method_id,
+				      u64 input, size_t min_size, u64 *result)
+{
+	return linuwu_sense_wmi_invoke_u64(wdev, method_id, &input,
+					   sizeof(input), min_size, result) ?
+		       AE_ERROR :
+		       AE_OK;
+}
+
+int linuwu_sense_wmi_execute_u32_u64(struct wmi_device *wdev, u32 method_id,
+				     u32 input, u64 *result)
+{
+	return linuwu_sense_wmi_invoke_u64(wdev, method_id, &input,
+					   sizeof(input), sizeof(u32), result);
+}

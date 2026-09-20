@@ -14,4 +14,28 @@ acpi_status linuwu_sense_wmi_execute_u64(struct wmi_device *wdev,
                                          u32 method_id, u64 input,
                                          u64 *result);
 
+/*
+ * Execute an Acer WMI method whose input is a u64 and whose result is
+ * returned as either a u32 or u64 value. @min_size is the minimum size of the
+ * result data in bytes, the WMI subsystem fails the call if the device
+ * returns less data.
+ *
+ * This variant exists for commands which some firmware revisions only answer
+ * with a u32 value.
+ */
+acpi_status linuwu_sense_wmi_execute_u64_min_size(struct wmi_device *wdev,
+						  u32 method_id, u64 input,
+						  size_t min_size,
+						  u64 *result);
+
+/*
+ * Execute an Acer WMI method whose input is a u32 and whose result is
+ * returned as either a u32 or u64 value.
+ *
+ * Unlike linuwu_sense_wmi_execute_u64(), this returns the raw error code of
+ * the WMI subsystem so that callers can propagate it.
+ */
+int linuwu_sense_wmi_execute_u32_u64(struct wmi_device *wdev, u32 method_id,
+				     u32 input, u64 *result);
+
 #endif /* LINUWU_SENSE_WMI_H */
