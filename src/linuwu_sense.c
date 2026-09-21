@@ -344,28 +344,13 @@ static int wmab_execute(struct acer_wmi *acer, struct wmab_args *regbuf,
 			struct wmab_ret *ret)
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_AMW0];
-	struct wmi_buffer in = { .length = sizeof(*regbuf), .data = regbuf };
-	struct wmi_buffer out = {};
-	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	err = wmidev_invoke_method(wdev, 0, 1, &in, &out,
-				   ret ? sizeof(*ret) : 0);
-	if (err)
-		return err;
-
-	if (ret) {
-		if (out.length < sizeof(*ret))
-			err = -ENOMSG;
-		else
-			memcpy(ret, out.data, sizeof(*ret));
-	}
-
-	kfree(out.data);
-
-	return err;
+	return linuwu_sense_wmi_execute_buffer(
+       wdev, 1, regbuf, sizeof(*regbuf), ret ? sizeof(*ret) : 0,
+       ret, ret ? sizeof(*ret) : 0);
 }
 
 static acpi_status AMW0_get_u32(struct acer_wmi *acer, u32 *value, u32 cap)
@@ -576,22 +561,20 @@ static acpi_status WMI_execute_u32(struct acer_wmi *acer, u32 method_id, u32 in,
 				   u32 *out)
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID];
-	struct wmi_buffer input = { .length = sizeof(in), .data = &in };
-	struct wmi_buffer result = {};
+	u32 result;
 	int err;
 
 	if (!wdev)
 		return AE_ERROR;
 
-	err = wmidev_invoke_method(wdev, 0, method_id, &input, &result,
-				   sizeof(u32));
+	err = linuwu_sense_wmi_execute_buffer(
+       wdev, method_id, &in, sizeof(in), sizeof(result),
+       &result, sizeof(result));
 	if (err)
 		return AE_ERROR;
 
 	if (out)
-		*out = get_unaligned_le32(result.data);
-
-	kfree(result.data);
+		*out = get_unaligned_le32(&result);
 
 	return AE_OK;
 }
@@ -686,23 +669,16 @@ static acpi_status wmid3_get_device_status(struct acer_wmi *acer, u32 *value,
 		.hotkey_number = commun_fn_key_number,
 		.devices = device,
 	};
-	struct wmi_buffer input = {
-		.length = sizeof(struct wmid3_gds_get_input_param),
-		.data = &params,
-	};
-	struct wmi_buffer output = {};
 	int err;
 
 	if (!wdev)
 		return AE_ERROR;
 
-	err = wmidev_invoke_method(wdev, 0, 0x2, &input, &output,
-				   sizeof(return_value));
+	err = linuwu_sense_wmi_execute_buffer(
+       wdev, 0x2, &params, sizeof(params), sizeof(return_value),
+       &return_value, sizeof(return_value));
 	if (err)
 		return AE_ERROR;
-
-	memcpy(&return_value, output.data, sizeof(return_value));
-	kfree(output.data);
 
 	if (return_value.error_code || return_value.ec_return_value) {
 		pr_warn("Get 0x%x Device Status failed: 0x%x - 0x%x\n", device,
@@ -740,6 +716,7 @@ static acpi_status wmid3_set_device_status(struct acer_wmi *acer, u32 value,
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
 	struct wmid3_gds_return_value return_value;
+	u8 set_return[2];
 	u16 devices;
 	struct wmid3_gds_get_input_param get_params = {
 		.function_num = 0x1,
@@ -751,27 +728,16 @@ static acpi_status wmid3_set_device_status(struct acer_wmi *acer, u32 value,
 		.hotkey_number = commun_fn_key_number,
 		.devices = commun_func_bitmap,
 	};
-	struct wmi_buffer get_input = {
-		.length = sizeof(struct wmid3_gds_get_input_param),
-		.data = &get_params,
-	};
-	struct wmi_buffer set_input = {
-		.length = sizeof(struct wmid3_gds_set_input_param),
-		.data = &set_params,
-	};
-	struct wmi_buffer output = {};
 	int err;
 
 	if (!wdev)
 		return AE_ERROR;
 
-	err = wmidev_invoke_method(wdev, 0, 0x2, &get_input, &output,
-				   sizeof(return_value));
+	err = linuwu_sense_wmi_execute_buffer(
+       wdev, 0x2, &get_params, sizeof(get_params), sizeof(return_value),
+       &return_value, sizeof(return_value));
 	if (err)
 		return AE_ERROR;
-
-	memcpy(&return_value, output.data, sizeof(return_value));
-	kfree(output.data);
 
 	if (return_value.error_code || return_value.ec_return_value) {
 		pr_warn("Get Current Device Status failed: 0x%x - 0x%x\n",
@@ -782,14 +748,14 @@ static acpi_status wmid3_set_device_status(struct acer_wmi *acer, u32 value,
 	devices = return_value.devices;
 	set_params.devices = (value) ? (devices | device) : (devices & ~device);
 
-	err = wmidev_invoke_method(wdev, 0, 0x1, &set_input, &output,
-				   sizeof(u32));
+	err = linuwu_sense_wmi_execute_buffer(
+       wdev, 0x1, &set_params, sizeof(set_params), sizeof(u32),
+       set_return, sizeof(set_return));
 	if (err)
 		return AE_ERROR;
 
-	return_value.error_code = ((u8 *)output.data)[0];
-	return_value.ec_return_value = ((u8 *)output.data)[1];
-	kfree(output.data);
+	return_value.error_code = set_return[0];
+   return_value.ec_return_value = set_return[1];
 
 	if (return_value.error_code || return_value.ec_return_value)
 		pr_warn("Set Device Status failed: 0x%x - 0x%x\n",
@@ -849,19 +815,18 @@ static void type_aa_dmi_decode(const struct dmi_header *header, void *d)
 static int WMID_set_capabilities(struct acer_wmi *acer)
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_DATA];
-	struct wmi_buffer out = {};
 	u32 devices;
 	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	err = wmidev_query_block(wdev, 0, &out, sizeof(u32));
+	err = linuwu_sense_wmi_query_block(
+       wdev, 0, sizeof(devices), &devices, sizeof(devices));
 	if (err)
 		return err;
 
-	devices = get_unaligned_le32(out.data);
-	kfree(out.data);
+	devices = get_unaligned_le32(&devices);
 
 	pr_info("Function bitmap for Communication Device: 0x%x\n", devices);
 	if (devices & 0x07)
@@ -1184,38 +1149,32 @@ static void acer_kbd_dock_get_initial_state(struct acer_wmi *acer)
 		0x05,
 		0x00,
 	};
-	struct wmi_buffer input_buf = { .length = sizeof(input),
-					.data = input };
-	struct wmi_buffer output_buf = {};
-	u8 *output;
+	u8 output[8];
 	int err;
 	int sw_tablet_mode;
 
 	if (!wdev)
 		return;
 
-	err = wmidev_invoke_method(wdev, 0, 0x2, &input_buf, &output_buf,
-				   sizeof(input));
+	err = linuwu_sense_wmi_execute_buffer(
+       wdev, 0x2, input, sizeof(input), sizeof(output), output,
+       sizeof(output));
 	if (err) {
 		pr_err("Error getting keyboard-dock initial status: %d\n", err);
 		return;
 	}
 
-	output = output_buf.data;
 	if (output[0] != 0x00 || (output[3] != 0x05 && output[3] != 0x45)) {
 		pr_err("Unexpected output [0]=0x%02x [3]=0x%02x getting "
 		       "keyboard-dock initial status\n",
 		       output[0], output[3]);
-		goto out_free;
+		return;
 	}
 
 	sw_tablet_mode = acer_kbd_dock_state_to_sw_tablet_mode(output[4]);
 	if (acer->input_dev)
 		input_report_switch(acer->input_dev, SW_TABLET_MODE,
 				    sw_tablet_mode);
-
-out_free:
-	kfree(output_buf.data);
 }
 
 static void acer_kbd_dock_event(struct acer_wmi *acer,
@@ -1530,25 +1489,15 @@ static int wmid3_set_function_mode(struct acer_wmi *acer,
 				   struct func_return_value *return_value)
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
-	struct wmi_buffer input = {
-		.length = sizeof(struct func_input_params),
-		.data = params,
-	};
-	struct wmi_buffer output = {};
 	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	err = wmidev_invoke_method(wdev, 0, 0x1, &input, &output,
-				   sizeof(*return_value));
-	if (err)
-		return err;
-
-	memcpy(return_value, output.data, sizeof(*return_value));
-	kfree(output.data);
-
-	return 0;
+	err = linuwu_sense_wmi_execute_buffer(
+       wdev, 0x1, params, sizeof(*params), sizeof(*return_value),
+       return_value, sizeof(*return_value));
+   return err;
 }
 
 static int acer_wmi_enable_ec_raw(struct acer_wmi *acer)
@@ -1691,19 +1640,18 @@ static int acer_wmi_input_setup(struct acer_wmi *acer)
 static u32 get_wmid_devices(struct acer_wmi *acer)
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_DATA];
-	struct wmi_buffer out = {};
 	u32 devices = 0;
 	int err;
 
 	if (!wdev)
 		return 0;
 
-	err = wmidev_query_block(wdev, 0, &out, sizeof(u32));
+	err = linuwu_sense_wmi_query_block(
+       wdev, 0, sizeof(devices), &devices, sizeof(devices));
 	if (err)
 		return 0;
 
-	devices = get_unaligned_le32(out.data);
-	kfree(out.data);
+	devices = get_unaligned_le32(&devices);
 
 	return devices;
 }

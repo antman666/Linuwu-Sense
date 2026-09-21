@@ -23,6 +23,19 @@ int linuwu_sense_wmi_execute_buffer(struct wmi_device *wdev, u32 method_id,
 				    size_t output_size);
 
 /*
+ * Query an Acer WMI data block with arbitrary output buffers.
+ *
+ * @min_size is the minimum result size requested from the WMI subsystem.
+ * If @output is non-NULL, up to @output_size bytes are copied from the
+ * WMI result buffer. The destination is zero-filled before copying.
+ *
+ * Returns the raw errno returned by the WMI subsystem, or a local errno on
+ * a missing output buffer when a caller requested one.
+ */
+int linuwu_sense_wmi_query_block(struct wmi_device *wdev, u8 instance,
+                    size_t min_size, void *output, size_t output_size);
+
+/*
  * Execute an Acer WMI method whose input is a u64 and whose result is
  * returned as either a u32 or u64 value.
  */
