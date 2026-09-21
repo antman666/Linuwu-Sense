@@ -495,7 +495,8 @@ static const struct dmi_system_id non_acer_quirks[] = {
 
 /*
  * Return the quirk entry of the first matching DMI entry. A capability
- * override is applied on the way, but does not select a quirk entry.
+ * override does not select a quirk entry. Its effective value is queried
+ * separately so DMI matching remains free of side effects.
  */
 static const struct linuwu_sense_quirks *
 linuwu_sense_quirks_from_table(const struct dmi_system_id *table)
@@ -508,15 +509,10 @@ linuwu_sense_quirks_from_table(const struct dmi_system_id *table)
 		return NULL;
 
 	quirks = entry->driver_data;
-	if (quirks->force_caps) {
-		if (force_caps == -1) {
-			force_caps = quirks->force_caps;
-			pr_info("Found %s, set force_caps to 0x%x\n",
-				entry->ident, force_caps);
-		}
 
+	/* Keep the historical behavior: this model uses only force_caps. */
+	if (quirks->force_caps)
 		return NULL;
-	}
 
 	return quirks;
 }
@@ -558,7 +554,35 @@ const struct linuwu_sense_quirks *linuwu_sense_quirks_match(void)
 	return quirks;
 }
 
+static int
+linuwu_sense_quirks_dmi_force_caps(const struct dmi_system_id *table)
+{
+	const struct dmi_system_id *entry;
+	const struct linuwu_sense_quirks *quirks;
+
+	entry = dmi_first_match(table);
+	if (!entry)
+		return -1;
+
+	quirks = entry->driver_data;
+	if (!quirks->force_caps)
+		return -1;
+
+	return quirks->force_caps;
+}
+
 int linuwu_sense_quirks_force_caps(void)
 {
-	return force_caps;
+	int caps;
+
+	/* An explicit module parameter always takes precedence. */
+	if (force_caps >= 0)
+		return force_caps;
+
+	/* Preserve the original DMI table priority and first-match behavior. */
+	caps = linuwu_sense_quirks_dmi_force_caps(acer_quirks);
+	if (caps >= 0)
+		return caps;
+
+	return linuwu_sense_quirks_dmi_force_caps(non_acer_quirks);
 }
