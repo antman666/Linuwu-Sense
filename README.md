@@ -1,7 +1,7 @@
-# Unofficial Linux Kernel Module for Acer Gaming RGB Keyboard Backlight and Turbo Mode (Acer Predator , Nitro)
+# Unofficial Linux Kernel Module for Acer Gaming RGB Keyboard Backlight and Turbo Mode (Acer Predator, Nitro)
 The code base is still in its early stages, as I’ve just started working on developing this kernel module. It's a bit messy at the moment, but I’m hopeful that, with your help, we can collaborate to improve its structure and make it more organized over time.
 
-Inspired by [acer-predator-turbo](https://github.com/JafarAkhondali/acer-predator-turbo-and-rgb-keyboard-linux-module), which has a similar goal, this project was born out of my own challenges. I faced issues detecting the Turbo key and ended up using [acer_wmi](https://github.com/torvalds/linux/blob/master/drivers/platform/x86/acer-wmi.c), but it lacked key features like RGB , custom fan support, battery limiter, and more. As a result, I decided to implement these missing features in my own project.
+Inspired by [acer-predator-turbo](https://github.com/JafarAkhondali/acer-predator-turbo-and-rgb-keyboard-linux-module), which has a similar goal, this project was born out of my own challenges. I faced issues detecting the Turbo key and ended up using [acer_wmi](https://github.com/torvalds/linux/blob/master/drivers/platform/x86/acer-wmi.c), but it lacked key features like RGB , custom fan support, battery limiter, and more. As a result, I decided to implement these missing features in my own project. This driver is not a generic Acer driver and not an acer_wmi fork: it only binds to the Acer Predator/Nitro models listed below and refuses to load on any other machine.
 
 ## 🚀 Installation
 To begin, identify your current kernel version:
@@ -20,7 +20,7 @@ git clone https://github.com/0x7375646F/Linuwu-Sense.git
 cd Linuwu-Sense
 make install
 ```
-The make command will remove the current acer_wmi module and load the patched version.
+`make install` removes the running `acer_wmi` module, blacklists it, installs `linuwu_sense.ko` and loads it. `acer_wmi` and this driver talk to the same WMI devices on these machines, so `acer_wmi` must stay unloaded while `linuwu_sense` is in use (the kernel does not enforce this automatically).
 
 To Uninstall:
 ```bash
@@ -29,10 +29,19 @@ make uninstall
 > **⚠️ Warning!**
 > ## Use at your own risk! This driver is independently developed through reverse engineering the official PredatorSense app, without any involvement from Acer. It interacts with low-level WMI methods, which may not be tested across all models.
 
+## ✅ Supported devices
+Linuwu-Sense only targets Acer Predator/Nitro laptops. It is not a generic Acer driver: the module refuses to load unless the machine matches one of the exact DMI entries in the driver. There is no `force_*`, `predator_v4` or `nitro_v4` module parameter to bypass this check.
+
+**Predator:** PH315-53, PHN16-71, PHN16-72, PH16-71, PH18-71, PTX17-71
+
+**Nitro:** AN16-41, AN16-42, AN16-43, AN515-58, AN515-55, ANV16-41, ANV15-41, ANV15-51
+
+Only Predator PHN16-71 is fully supported. The other models are matched by the code, but the controls listed below are only available when the model supports them.
+
 ## 🛠️ Usage
 # Example Usage and Configuration
 
-Thermal profiles can be easily switched with a single click! 😎 For battery mode, you can choose between Eco and Balanced, while when plugged into AC, you have the options for Quiet, Balanced, Performance, and Turbo. ⚡💻 Each profile will be different for battery and AC, and the thermal and fan settings will automatically adjust based on your current power source. Customize it to fit your preferences! 🌟
+Thermal profiles can be switched through `/sys/firmware/acpi/platform_profile`. The available choices are read from the firmware and mapped to the matching Predator/Nitro thermal profile. On Predator models the driver also follows the current power source and the Turbo hotkey cycles through the available profiles. ⚡💻 Customize it to fit your preferences! 🌟
 
 ---
 
@@ -40,7 +49,10 @@ For **Predator** laptops, the following path is used: `/sys/module/linuwu_sense/
 
 For **Nitro** laptops, the following path is used: `/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/nitro_sense`
 
-predator_sense – This directory includes all the features, excluding the custom boot logo functionality.
+predator_sense – The Predator controls provided by this driver: LCD override, fan speed, turbo mode, battery limiter, battery calibration, USB charging, backlight timeout and boot animation sound. Only the controls supported by the model are shown.
+
+nitro_sense – The equivalent controls on Nitro laptops. Which files are available depends on the model.
+
 four_zoned_kb – If your keyboard is four-zoned, this directory provides support for it. Unfortunately, there is no support for per-key RGB keyboards.
 Here is how to interact with the Virtual Filesystems (VFS) mounted in this path:
 
@@ -250,16 +262,12 @@ The `four_zone_mode` controls advanced RGB effects for your keyboard, requiring 
     - `0`: Green (black for Neon)
     - `0`: Blue (black for Neon)
  
-The thermal and fan profiles will be saved and loaded on each reboot, ensuring that the settings remain persistent across restarts.
-## GUI:
+The four-zone keyboard state is saved when the module is unloaded and restored on the next load (it is stored in `/etc/four_zone_kb_state`). The provided `linuwu_sense.service` unloads the module at shutdown, so the keyboard state survives a reboot.
+
+## GUI (third-party)
+The following projects are separate third-party frontends that talk to this module:
 - [Div Acer Manager Max By PXDiv](https://github.com/PXDiv/Div-Acer-Manager-Max)
 - [GUI LinuwuSense By KumarVivek](https://github.com/kumarvivek1752/Linuwu-Sense-GUI/tree/main)
-
-## 🚧 Roadmap:
-- [x] GUI for keyboard rgb controls to make it noob friendly.
-- [x] Module Persistence After Reboot.
-- [ ] Custom Boot Logo Feature Support.
-- [ ] More device support currently only ( PHN16-71 ) is fully supported.
 
 ## License
 GNU General Public License v3
