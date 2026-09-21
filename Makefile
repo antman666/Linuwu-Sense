@@ -2,7 +2,7 @@ obj-m := linuwu_sense.o
 linuwu_sense-y := \
 	src/linuwu_sense.o \
 	src/linuwu_sense_fan.o \
-	src/linuwu_sense_wmi.o \
+	src/linuwu_sense_event.o \
 	src/linuwu_sense_hwmon.o \
 	src/linuwu_sense_gaming.o \
 	src/linuwu_sense_profile.o \

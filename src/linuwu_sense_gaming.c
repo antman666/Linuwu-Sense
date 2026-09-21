@@ -10,15 +10,17 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/acpi.h>
 #include <linux/bitfield.h>
 #include <linux/kernel.h>
+#include <linux/minmax.h>
+#include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/types.h>
+#include <linux/unaligned.h>
 #include <linux/wmi.h>
 
 #include "linuwu_sense.h"
 #include "linuwu_sense_gaming.h"
-#include "linuwu_sense_wmi.h"
 
 /*
  * Method IDs of the Predator Gaming WMI device
@@ -103,35 +105,48 @@ struct set_battery_health_control_output {
 } __packed;
 
 /*
- * Execute a Predator Gaming WMI method through the WMI transport. Some of the
- * commands are only answered with a u32 value, so the minimum result size has
- * to be a u32.
+ * Decode the result of a Predator Gaming WMI method. Some of the commands are
+ * only answered with a u32 value while others return a full u64 value.
  */
-static acpi_status linuwu_sense_gaming_execute(struct acer_wmi *acer,
-					       enum acer_wmi_guid guid,
-					       u32 method_id, u64 input,
-					       u64 *result)
+static int linuwu_sense_gaming_decode_result(const struct wmi_buffer *output,
+					     u64 *result)
 {
-	struct wmi_device *wdev = acer->wdevs[guid];
+	if (output->length >= sizeof(*result))
+		*result = get_unaligned_le64(output->data);
+	else if (output->length >= sizeof(u32))
+		*result = get_unaligned_le32(output->data);
+	else
+		return -EIO;
 
-	if (!wdev)
-		return AE_ERROR;
-
-	return linuwu_sense_wmi_execute_u64_min_size(wdev, method_id, input,
-						     sizeof(u32), result);
+	return 0;
 }
 
 int linuwu_sense_gaming_get_sys_info(struct acer_wmi *acer, u32 command,
 				     u64 *out)
 {
-	acpi_status status;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	u64 input_value = command;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
+	int err;
 
-	status = linuwu_sense_gaming_execute(
-		acer, ACER_WMI_GUID_WMID_GAMING,
-		ACER_WMID_GET_GAMING_SYS_INFO_METHODID, command, &result);
-	if (ACPI_FAILURE(status))
-		return -EIO;
+	if (!wdev)
+		return -ENODEV;
+
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_GET_GAMING_SYS_INFO_METHODID,
+				   &input, &output, sizeof(u32));
+	if (err)
+		return err;
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err)
+		return err;
 
 	/* The return status must be zero for the operation to have succeeded */
 	if (FIELD_GET(ACER_PREDATOR_V4_RETURN_STATUS_BIT_MASK, result))
@@ -160,18 +175,32 @@ int linuwu_sense_gaming_get_power_source(struct acer_wmi *acer, bool *on_ac)
 static int linuwu_sense_gaming_set_misc_setting(struct acer_wmi *acer,
 						u8 setting, u8 value)
 {
-	acpi_status status;
-	u64 input = 0;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	u64 input_value = 0;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
+	int err;
 
-	input |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK, setting);
-	input |= FIELD_PREP(ACER_GAMING_MISC_SETTING_VALUE_MASK, value);
+	if (!wdev)
+		return -ENODEV;
 
-	status = linuwu_sense_gaming_execute(
-		acer, ACER_WMI_GUID_WMID_GAMING,
-		ACER_WMID_SET_GAMING_MISC_SETTING_METHODID, input, &result);
-	if (ACPI_FAILURE(status))
-		return -EIO;
+	input_value |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK, setting);
+	input_value |= FIELD_PREP(ACER_GAMING_MISC_SETTING_VALUE_MASK, value);
+
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_SET_GAMING_MISC_SETTING_METHODID,
+				   &input, &output, sizeof(u32));
+	if (err)
+		return err;
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err)
+		return err;
 
 	/* The return status must be zero for the operation to have succeeded */
 	if (FIELD_GET(ACER_GAMING_MISC_SETTING_STATUS_MASK, result))
@@ -184,20 +213,30 @@ static int linuwu_sense_gaming_get_misc_setting(struct acer_wmi *acer,
 						u8 setting, u8 *value)
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
-	u64 input = 0;
+	u32 input_value = 0;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
-	int ret;
+	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	input |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK, setting);
+	input_value |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK, setting);
 
-	ret = linuwu_sense_wmi_execute_u32_u64(
-		wdev, ACER_WMID_GET_GAMING_MISC_SETTING_METHODID, input,
-		&result);
-	if (ret < 0)
-		return ret;
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_GET_GAMING_MISC_SETTING_METHODID,
+				   &input, &output, sizeof(u32));
+	if (err)
+		return err;
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err)
+		return err;
 
 	/* The return status must be zero for the operation to have succeeded */
 	if (FIELD_GET(ACER_GAMING_MISC_SETTING_STATUS_MASK, result))
@@ -231,17 +270,34 @@ int linuwu_sense_gaming_get_supported_thermal_profiles(struct acer_wmi *acer,
 
 int linuwu_sense_gaming_get_lcd_override(struct acer_wmi *acer, int *state)
 {
-	acpi_status status;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	u64 input_value = 0x00;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
+	int err;
 
-	status = linuwu_sense_gaming_execute(
-		acer, ACER_WMI_GUID_WMID_GAMING,
-		ACER_WMID_GET_GAMING_PROFILE_METHODID, 0x00, &result);
-	if (ACPI_FAILURE(status)) {
-		pr_err("Error getting lcd override status: %s\n",
-		       acpi_format_exception(status));
-		return -EIO;
+	if (!wdev)
+		return -ENODEV;
+
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_GET_GAMING_PROFILE_METHODID,
+				   &input, &output, sizeof(u32));
+	if (err) {
+		pr_err("Error getting lcd override status: %d\n", err);
+		return err;
 	}
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err) {
+		pr_err("Error getting lcd override status: %d\n", err);
+		return err;
+	}
+
 	pr_info("lcd override get status: %llu\n", result);
 	*state = result == 0x1000001000000 ? 1 : result == 0x1000000 ? 0 : -1;
 	return 0;
@@ -249,36 +305,68 @@ int linuwu_sense_gaming_get_lcd_override(struct acer_wmi *acer, int *state)
 
 int linuwu_sense_gaming_set_lcd_override(struct acer_wmi *acer, bool enable)
 {
-	acpi_status status;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	u64 input_value = enable ? 0x1000000000010 : 0x10;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
+	int err;
+
+	if (!wdev)
+		return -ENODEV;
 
 	pr_info("lcd_override set value: %d\n", enable);
-	status = linuwu_sense_gaming_execute(
-		acer, ACER_WMI_GUID_WMID_GAMING,
-		ACER_WMID_SET_GAMING_PROFILE_METHODID,
-		enable ? 0x1000000000010 : 0x10, &result);
-	if (ACPI_FAILURE(status)) {
-		pr_err("Error setting lcd override status: %s\n",
-		       acpi_format_exception(status));
-		return -EIO;
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_SET_GAMING_PROFILE_METHODID,
+				   &input, &output, sizeof(u32));
+	if (err) {
+		pr_err("Error setting lcd override status: %d\n", err);
+		return err;
 	}
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err) {
+		pr_err("Error setting lcd override status: %d\n", err);
+		return err;
+	}
+
 	pr_info("lcd override set status: %llu\n", result);
 	return 0;
 }
 
 int linuwu_sense_gaming_get_backlight_timeout(struct acer_wmi *acer, int *state)
 {
-	acpi_status status;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
+	u64 input_value = 0x88401;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
+	int err;
 
-	status = linuwu_sense_gaming_execute(acer, ACER_WMI_GUID_WMID_APGE,
-					     ACER_WMID_GET_FUNCTION, 0x88401,
-					     &result);
-	if (ACPI_FAILURE(status)) {
-		pr_err("Error getting backlight_timeout status: %s\n",
-		       acpi_format_exception(status));
-		return -EIO;
+	if (!wdev)
+		return -ENODEV;
+
+	err = wmidev_invoke_method(wdev, 0, ACER_WMID_GET_FUNCTION, &input,
+				   &output, sizeof(u32));
+	if (err) {
+		pr_err("Error getting backlight_timeout status: %d\n", err);
+		return err;
 	}
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err) {
+		pr_err("Error getting backlight_timeout status: %d\n", err);
+		return err;
+	}
+
 	pr_info("backlight_timeout get status: %llu\n", result);
 	*state = result == 0x1E0000080000 ? 1 : result == 0x80000 ? 0 : -1;
 	return 0;
@@ -287,19 +375,34 @@ int linuwu_sense_gaming_get_backlight_timeout(struct acer_wmi *acer, int *state)
 int linuwu_sense_gaming_set_backlight_timeout(struct acer_wmi *acer,
 					      bool enable)
 {
-	acpi_status status;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
+	u64 input_value = enable ? 0x1E0000088402 : 0x88402;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
+	int err;
+
+	if (!wdev)
+		return -ENODEV;
 
 	pr_info("bascklight_timeout set value: %d\n", enable);
-	status = linuwu_sense_gaming_execute(acer, ACER_WMI_GUID_WMID_APGE,
-					     ACER_WMID_SET_FUNCTION,
-					     enable ? 0x1E0000088402 : 0x88402,
-					     &result);
-	if (ACPI_FAILURE(status)) {
-		pr_err("Error setting backlight_timeout status: %s\n",
-		       acpi_format_exception(status));
-		return -EIO;
+	err = wmidev_invoke_method(wdev, 0, ACER_WMID_SET_FUNCTION, &input,
+				   &output, sizeof(u32));
+	if (err) {
+		pr_err("Error setting backlight_timeout status: %d\n", err);
+		return err;
 	}
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err) {
+		pr_err("Error setting backlight_timeout status: %d\n", err);
+		return err;
+	}
+
 	pr_info("backlight_timeout set status: %llu\n", result);
 	return 0;
 }
@@ -307,20 +410,36 @@ int linuwu_sense_gaming_set_backlight_timeout(struct acer_wmi *acer,
 int linuwu_sense_gaming_get_boot_animation_sound(struct acer_wmi *acer,
 						 int *state)
 {
-	acpi_status status;
-	u64 input = 0;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	u64 input_value = 0;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
+	int err;
 
-	input |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK,
-			    ACER_WMID_MISC_SETTING_BOOT_ANIMATION_SOUND);
-	status = linuwu_sense_gaming_execute(
-		acer, ACER_WMI_GUID_WMID_GAMING,
-		ACER_WMID_GET_GAMING_MISC_SETTING_METHODID, input, &result);
-	if (ACPI_FAILURE(status)) {
-		pr_err("Error getting boot_animation_sound status: %s\n",
-		       acpi_format_exception(status));
-		return -EIO;
+	if (!wdev)
+		return -ENODEV;
+
+	input_value |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK,
+				  ACER_WMID_MISC_SETTING_BOOT_ANIMATION_SOUND);
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_GET_GAMING_MISC_SETTING_METHODID,
+				   &input, &output, sizeof(u32));
+	if (err) {
+		pr_err("Error getting boot_animation_sound status: %d\n", err);
+		return err;
 	}
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err) {
+		pr_err("Error getting boot_animation_sound status: %d\n", err);
+		return err;
+	}
+
 	pr_info("boot_animation_sound get status: %llu\n", result);
 	*state = result == 0x100 ? 1 : result == 0 ? 0 : -1;
 	return 0;
@@ -329,39 +448,71 @@ int linuwu_sense_gaming_get_boot_animation_sound(struct acer_wmi *acer,
 int linuwu_sense_gaming_set_boot_animation_sound(struct acer_wmi *acer,
 						 bool enable)
 {
-	acpi_status status;
-	u64 input = 0;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	u64 input_value = 0;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
+	int err;
+
+	if (!wdev)
+		return -ENODEV;
 
 	pr_info("boot_animation_sound set value: %d\n", enable);
-	input |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK,
-			    ACER_WMID_MISC_SETTING_BOOT_ANIMATION_SOUND);
-	input |= FIELD_PREP(ACER_GAMING_MISC_SETTING_VALUE_MASK, enable);
-	status = linuwu_sense_gaming_execute(
-		acer, ACER_WMI_GUID_WMID_GAMING,
-		ACER_WMID_SET_GAMING_MISC_SETTING_METHODID, input, &result);
-	if (ACPI_FAILURE(status)) {
-		pr_err("Error setting boot_animation_sound status: %s\n",
-		       acpi_format_exception(status));
-		return -EIO;
+	input_value |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK,
+				  ACER_WMID_MISC_SETTING_BOOT_ANIMATION_SOUND);
+	input_value |= FIELD_PREP(ACER_GAMING_MISC_SETTING_VALUE_MASK, enable);
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_SET_GAMING_MISC_SETTING_METHODID,
+				   &input, &output, sizeof(u32));
+	if (err) {
+		pr_err("Error setting boot_animation_sound status: %d\n", err);
+		return err;
 	}
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err) {
+		pr_err("Error setting boot_animation_sound status: %d\n", err);
+		return err;
+	}
+
 	pr_info("boot_animation_sound set status: %llu\n", result);
 	return 0;
 }
 
 int linuwu_sense_gaming_get_usb_charging(struct acer_wmi *acer, int *percent)
 {
-	acpi_status status;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
+	u64 input_value = 0x4;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
+	int err;
 
-	status = linuwu_sense_gaming_execute(acer, ACER_WMI_GUID_WMID_APGE,
-					     ACER_WMID_GET_FUNCTION, 0x4,
-					     &result);
-	if (ACPI_FAILURE(status)) {
-		pr_err("Error getting usb charging status: %s\n",
-		       acpi_format_exception(status));
-		return -EIO;
+	if (!wdev)
+		return -ENODEV;
+
+	err = wmidev_invoke_method(wdev, 0, ACER_WMID_GET_FUNCTION, &input,
+				   &output, sizeof(u32));
+	if (err) {
+		pr_err("Error getting usb charging status: %d\n", err);
+		return err;
 	}
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err) {
+		pr_err("Error getting usb charging status: %d\n", err);
+		return err;
+	}
+
 	pr_info("usb charging get status: %llu\n", result);
 	/* -1 means unknown value */
 	*percent = result == 663296  ? 0 :
@@ -374,25 +525,40 @@ int linuwu_sense_gaming_get_usb_charging(struct acer_wmi *acer, int *percent)
 
 int linuwu_sense_gaming_set_usb_charging(struct acer_wmi *acer, u8 percent)
 {
-	acpi_status status;
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
+	u64 input_value;
+	struct wmi_buffer input = {
+		.length = sizeof(input_value),
+		.data = &input_value,
+	};
+	struct wmi_buffer output = {};
 	u64 result;
-	u64 value;
+	int err;
+
+	if (!wdev)
+		return -ENODEV;
 
 	pr_info("usb charging set value: %d\n", percent);
 	/* If the value is unknown then turn it off */
-	value = percent == 0  ? 663300 :
-		percent == 10 ? 659204 :
-		percent == 20 ? 1314564 :
-		percent == 30 ? 1969924 :
-				663300;
-	status = linuwu_sense_gaming_execute(acer, ACER_WMI_GUID_WMID_APGE,
-					     ACER_WMID_SET_FUNCTION, value,
-					     &result);
-	if (ACPI_FAILURE(status)) {
-		pr_err("Error setting usb charging status: %s\n",
-		       acpi_format_exception(status));
-		return -EIO;
+	input_value = percent == 0  ? 663300 :
+		      percent == 10 ? 659204 :
+		      percent == 20 ? 1314564 :
+		      percent == 30 ? 1969924 :
+				      663300;
+	err = wmidev_invoke_method(wdev, 0, ACER_WMID_SET_FUNCTION, &input,
+				   &output, sizeof(u32));
+	if (err) {
+		pr_err("Error setting usb charging status: %d\n", err);
+		return err;
 	}
+
+	err = linuwu_sense_gaming_decode_result(&output, &result);
+	kfree(output.data);
+	if (err) {
+		pr_err("Error setting usb charging status: %d\n", err);
+		return err;
+	}
+
 	pr_info("usb charging set status: %llu\n", result);
 	return 0;
 }
@@ -408,6 +574,11 @@ int linuwu_sense_gaming_get_battery_mode(
 		.uReserved = { 0x0, 0x0 }
 	};
 	struct get_battery_health_control_status_output ret;
+	struct wmi_buffer input = {
+		.length = sizeof(params),
+		.data = &params,
+	};
+	struct wmi_buffer output = {};
 	int err;
 
 	pr_info("battery health query: %d\n", mode);
@@ -415,14 +586,20 @@ int linuwu_sense_gaming_get_battery_mode(
 	if (!wdev)
 		return -ENODEV;
 
-	err = linuwu_sense_wmi_execute_buffer(
-		wdev, ACER_WMID_GET_BATTERY_HEALTH_CONTROL_STATUS_METHODID,
-		&params, sizeof(params), sizeof(ret), &ret, sizeof(ret));
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_GET_BATTERY_HEALTH_CONTROL_STATUS_METHODID,
+				   &input, &output, sizeof(ret));
 	if (err) {
 		pr_err("Unexpected output getting battery health status: %d\n",
 		       err);
 		goto out;
 	}
+
+	if (output.length < sizeof(ret)) {
+		err = -EIO;
+		goto out;
+	}
+	memcpy(&ret, output.data, sizeof(ret));
 
 	switch (mode) {
 	case LINUWU_SENSE_GAMING_BATTERY_MODE_HEALTH:
@@ -437,6 +614,7 @@ int linuwu_sense_gaming_get_battery_mode(
 	}
 
 out:
+	kfree(output.data);
 	return err;
 }
 
@@ -452,6 +630,11 @@ int linuwu_sense_gaming_set_battery_mode(
 		.uReservedIn = { 0x0, 0x0, 0x0, 0x0, 0x0 }
 	};
 	struct set_battery_health_control_output ret;
+	struct wmi_buffer input = {
+		.length = sizeof(params),
+		.data = &params,
+	};
+	struct wmi_buffer output = {};
 	int err;
 
 	pr_info("%s: %d | %d\n", __func__, mode, status);
@@ -459,14 +642,20 @@ int linuwu_sense_gaming_set_battery_mode(
 	if (!wdev)
 		return -ENODEV;
 
-	err = linuwu_sense_wmi_execute_buffer(
-		wdev, ACER_WMID_SET_BATTERY_HEALTH_CONTROL_METHODID, &params,
-		sizeof(params), sizeof(ret), &ret, sizeof(ret));
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_SET_BATTERY_HEALTH_CONTROL_METHODID,
+				   &input, &output, sizeof(ret));
 	if (err) {
 		pr_err("Unexpected output setting battery health status: %d\n",
 		       err);
 		goto out;
 	}
+
+	if (output.length < sizeof(ret)) {
+		err = -EIO;
+		goto out;
+	}
+	memcpy(&ret, output.data, sizeof(ret));
 
 	if (ret.uReturn != 0 && ret.uReservedOut != 0) {
 		pr_err("Failed to set battery health status\n");
@@ -475,6 +664,7 @@ int linuwu_sense_gaming_set_battery_mode(
 	}
 
 out:
+	kfree(output.data);
 	return err;
 }
 
@@ -483,19 +673,30 @@ int linuwu_sense_gaming_get_kb_backlight(
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
 	struct get_four_zoned_kb_output out;
+	struct wmi_buffer input = {};
+	struct wmi_buffer output = {};
 	u64 in = 1;
 	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	err = linuwu_sense_wmi_execute_buffer(
-		wdev, ACER_WMID_GET_GAMING_KB_BACKLIGHT_METHODID, &in,
-		sizeof(in), sizeof(out), &out, sizeof(out));
+	input.length = sizeof(in);
+	input.data = &in;
+
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_GET_GAMING_KB_BACKLIGHT_METHODID,
+				   &input, &output, sizeof(out));
 	if (err) {
 		pr_err("Unexpected output getting kb zone status: %d\n", err);
 		goto out;
 	}
+
+	if (output.length < sizeof(out)) {
+		err = -EIO;
+		goto out;
+	}
+	memcpy(&out, output.data, sizeof(out));
 
 	state->mode = out.gmOutput[0];
 	state->speed = out.gmOutput[1];
@@ -506,6 +707,7 @@ int linuwu_sense_gaming_get_kb_backlight(
 	state->blue = out.gmOutput[7];
 
 out:
+	kfree(output.data);
 	return err;
 }
 
@@ -515,6 +717,11 @@ int linuwu_sense_gaming_set_kb_backlight(
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
 	u8 gmInput[16] = {};
+	struct wmi_buffer input = {
+		.length = sizeof(gmInput),
+		.data = gmInput,
+	};
+	struct wmi_buffer output = {};
 	u64 resp = 0;
 	int err;
 
@@ -531,18 +738,20 @@ int linuwu_sense_gaming_set_kb_backlight(
 	gmInput[8] = 3;
 	gmInput[9] = 1;
 
-	err = linuwu_sense_wmi_execute_buffer(
-		wdev, ACER_WMID_SET_GAMING_KB_BACKLIGHT_METHODID, gmInput,
-		sizeof(gmInput), sizeof(u32), &resp, sizeof(resp));
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_SET_GAMING_KB_BACKLIGHT_METHODID,
+				   &input, &output, sizeof(u32));
 	if (err)
-		goto out;
+		return err;
+
+	memcpy(&resp, output.data, min_t(size_t, output.length, sizeof(resp)));
+	kfree(output.data);
 
 	if (resp != 0) {
 		pr_err("failed to set keyboard rgb: %llu\n", resp);
 		err = -EIO;
 	}
 
-out:
 	return err;
 }
 
@@ -552,19 +761,28 @@ int linuwu_sense_gaming_get_kb_zone_color(struct acer_wmi *acer,
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
 	u64 value = acer_wmid_kb_zone_ids[zone];
+	u64 result = 0;
+	struct wmi_buffer input = {
+		.length = sizeof(value),
+		.data = &value,
+	};
+	struct wmi_buffer output = {};
 	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	err = linuwu_sense_wmi_execute_buffer(
-		wdev, ACER_WMID_GET_GAMING_RGB_KB_METHODID, &value,
-		sizeof(value), sizeof(u32), &value, sizeof(value));
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_GET_GAMING_RGB_KB_METHODID,
+				   &input, &output, sizeof(u32));
 	if (err)
 		goto err_log;
 
+	memcpy(&result, output.data, min_t(size_t, output.length, sizeof(result)));
+	kfree(output.data);
+
 	/* The color is stored in the upper three bytes of the response */
-	*color = cpu_to_be64(value) >> 32;
+	*color = cpu_to_be64(result) >> 32;
 
 	return 0;
 
@@ -578,17 +796,21 @@ int linuwu_sense_gaming_set_kb_zone_color(struct acer_wmi *acer,
 					  u64 color)
 {
 	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
-	u64 value;
+	u64 value = (cpu_to_be64(color) >> 32) | acer_wmid_kb_zone_ids[zone];
+	struct wmi_buffer input = {
+		.length = sizeof(value),
+		.data = &value,
+	};
+	struct wmi_buffer output = {};
 	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	value = (cpu_to_be64(color) >> 32) | acer_wmid_kb_zone_ids[zone];
-
-	err = linuwu_sense_wmi_execute_buffer(
-		wdev, ACER_WMID_SET_GAMING_RGB_KB_METHODID, &value,
-		sizeof(value), sizeof(u32), NULL, 0);
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_SET_GAMING_RGB_KB_METHODID,
+				   &input, &output, sizeof(u32));
+	kfree(output.data);
 	if (err)
 		pr_err("Error setting KB color (zone %d): %d\n", zone + 1, err);
 
