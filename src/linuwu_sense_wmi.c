@@ -47,39 +47,6 @@ out:
 	return err;
 }
 
-int linuwu_sense_wmi_query_block(struct wmi_device *wdev, u8 instance,
-				 size_t min_size, void *output,
-				 size_t output_size)
-{
-	struct wmi_buffer output_buf = {};
-	size_t copy_len;
-	int err;
-
-	if (!wdev)
-		return -ENODEV;
-
-	err = wmidev_query_block(wdev, instance, &output_buf, min_size);
-	if (err)
-		goto out;
-
-	if (!output_buf.data && output && output_size) {
-		err = -EIO;
-		goto out;
-	}
-
-	if (output && output_size) {
-		memset(output, 0, output_size);
-		copy_len = output_size;
-		if (copy_len > output_buf.length)
-			copy_len = output_buf.length;
-		memcpy(output, output_buf.data, copy_len);
-	}
-
-out:
-	kfree(output_buf.data);
-	return err;
-}
-
 acpi_status linuwu_sense_wmi_execute_u64(struct wmi_device *wdev, u32 method_id,
 					 u64 input, u64 *result)
 {

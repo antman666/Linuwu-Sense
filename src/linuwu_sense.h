@@ -1,6 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 /*
- *  Acer WMI Laptop Extras
+ *  Acer Predator/Nitro WMI Laptop Extras
  *
  *  Copyright (C) 2007-2009	Carlos Corbacho <carlos@strangeworlds.co.uk>
  *
@@ -11,29 +11,20 @@
 #ifndef _LINUWU_SENSE_H_
 #define _LINUWU_SENSE_H_
 
-#include <linux/acpi.h>
 #include <linux/bits.h>
-#include <linux/leds.h>
+#include <linux/list.h>
 #include <linux/mutex.h>
 #include <linux/types.h>
-#include <linux/workqueue.h>
 
-struct dentry;
 struct device;
 struct input_dev;
 struct linuwu_sense_quirks;
 struct platform_device;
-struct rfkill;
 struct wmi_device;
 
 /*
  * Interface capability flags
  */
-#define ACER_CAP_MAILLED BIT(0)
-#define ACER_CAP_WIRELESS BIT(1)
-#define ACER_CAP_BLUETOOTH BIT(2)
-#define ACER_CAP_BRIGHTNESS BIT(3)
-#define ACER_CAP_THREEG BIT(4)
 #define ACER_CAP_SET_FUNCTION_MODE BIT(5)
 #define ACER_CAP_KBD_DOCK BIT(6)
 #define ACER_CAP_TURBO_FAN BIT(9)
@@ -45,30 +36,15 @@ struct wmi_device;
 
 /*
  * The WMI devices used by this driver. Acer firmware spreads the different
- * parts of the embedded controller interface over several WMI devices, which
- * are all children of the same WMI bus device.
+ * parts of the Predator/Nitro interface over several WMI devices, which are
+ * all children of the same WMI bus device.
  */
 enum acer_wmi_guid {
-	ACER_WMI_GUID_AMW0, /* AMW0_GUID1 */
-	ACER_WMI_GUID_AMW0_2, /* AMW0_GUID2 */
-	ACER_WMI_GUID_WMID, /* WMID_GUID1 */
-	ACER_WMI_GUID_WMID_DATA, /* WMID_GUID2 */
 	ACER_WMI_GUID_WMID_APGE, /* WMID_GUID3 */
 	ACER_WMI_GUID_WMID_GAMING, /* WMID_GUID4 */
 	ACER_WMI_GUID_WMID_BATTERY, /* WMID_GUID5 */
 	ACER_WMI_GUID_EVENT, /* ACERWMID_EVENT_GUID */
 	ACER_WMI_GUID_COUNT,
-};
-
-struct acer_data {
-	int mailled;
-	int threeg;
-	int brightness;
-};
-
-struct acer_debug {
-	struct dentry *root;
-	u32 wmid_devices;
 };
 
 struct per_zone_color {
@@ -114,20 +90,11 @@ struct acer_wmi {
 	/* Last setup attempt failed; cleared when a new WMI probe joins. */
 	bool setup_failed;
 
-	/* The WMI interface type */
-	u32 type;
-
 	/* The capabilities this interface provides */
 	u32 capability;
 
 	/* The model specific quirks which matched this machine */
 	const struct linuwu_sense_quirks *quirks;
-
-	/* Private data for the current interface */
-	struct acer_data data;
-
-	/* debugfs entries associated with this interface */
-	struct acer_debug debug;
 
 	/*
 	 * Protects the cached fan speed pair, keyboard state, power-source
@@ -145,16 +112,6 @@ struct acer_wmi {
 	bool ready;
 
 	struct input_dev *input_dev;
-	struct input_dev *accel_dev;
-	acpi_handle gsensor_handle;
-
-	struct led_classdev mail_led;
-	struct backlight_device *backlight;
-
-	struct rfkill *wireless_rfkill;
-	struct rfkill *bluetooth_rfkill;
-	struct rfkill *threeg_rfkill;
-	bool rfkill_inited;
 
 	struct device *platform_profile_dev;
 	bool platform_profile_support;
@@ -165,8 +122,6 @@ struct acer_wmi {
 	int cpu_fan_speed;
 	int gpu_fan_speed;
 	struct kb_state current_kb_state;
-
-	struct delayed_work rfkill_work;
 };
 
 #endif /* _LINUWU_SENSE_H_ */
