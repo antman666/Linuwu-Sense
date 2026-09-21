@@ -26,7 +26,6 @@ struct wmi_device;
  * Interface capability flags
  */
 #define ACER_CAP_SET_FUNCTION_MODE BIT(5)
-#define ACER_CAP_KBD_DOCK BIT(6)
 #define ACER_CAP_TURBO_FAN BIT(9)
 #define ACER_CAP_PLATFORM_PROFILE BIT(10)
 #define ACER_CAP_FAN_SPEED_READ BIT(11)
