@@ -314,8 +314,13 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 				break;
 			}
 
+			/*
+			 * The event reports key_num 1 while the AC
+			 * adapter is connected and 0 while it is
+			 * disconnected.
+			 */
 			linuwu_sense_profile_power_source_changed(
-				acer, event.key_num == 0);
+				acer, event.key_num != 0);
 		}
 		break;
 	case WMID_BATTERY_BOOST_EVENT:
