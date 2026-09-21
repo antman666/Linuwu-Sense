@@ -33,7 +33,8 @@ int linuwu_sense_wmi_execute_buffer(struct wmi_device *wdev, u32 method_id,
  * a missing output buffer when a caller requested one.
  */
 int linuwu_sense_wmi_query_block(struct wmi_device *wdev, u8 instance,
-                    size_t min_size, void *output, size_t output_size);
+				 size_t min_size, void *output,
+				 size_t output_size);
 
 /*
  * Execute an Acer WMI method whose input is a u64 and whose result is

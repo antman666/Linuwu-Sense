@@ -41,6 +41,7 @@
 #include "linuwu_sense_hwmon.h"
 #include "linuwu_sense_profile.h"
 #include "linuwu_sense_quirks.h"
+#include "linuwu_sense_wmi.h"
 
 MODULE_AUTHOR("Carlos Corbacho");
 MODULE_DESCRIPTION("Acer Laptop WMI Extras Driver");
@@ -348,9 +349,9 @@ static int wmab_execute(struct acer_wmi *acer, struct wmab_args *regbuf,
 	if (!wdev)
 		return -ENODEV;
 
-	return linuwu_sense_wmi_execute_buffer(
-       wdev, 1, regbuf, sizeof(*regbuf), ret ? sizeof(*ret) : 0,
-       ret, ret ? sizeof(*ret) : 0);
+	return linuwu_sense_wmi_execute_buffer(wdev, 1, regbuf, sizeof(*regbuf),
+					       ret ? sizeof(*ret) : 0, ret,
+					       ret ? sizeof(*ret) : 0);
 }
 
 static acpi_status AMW0_get_u32(struct acer_wmi *acer, u32 *value, u32 cap)
@@ -567,9 +568,9 @@ static acpi_status WMI_execute_u32(struct acer_wmi *acer, u32 method_id, u32 in,
 	if (!wdev)
 		return AE_ERROR;
 
-	err = linuwu_sense_wmi_execute_buffer(
-       wdev, method_id, &in, sizeof(in), sizeof(result),
-       &result, sizeof(result));
+	err = linuwu_sense_wmi_execute_buffer(wdev, method_id, &in, sizeof(in),
+					      sizeof(result), &result,
+					      sizeof(result));
 	if (err)
 		return AE_ERROR;
 
@@ -675,8 +676,8 @@ static acpi_status wmid3_get_device_status(struct acer_wmi *acer, u32 *value,
 		return AE_ERROR;
 
 	err = linuwu_sense_wmi_execute_buffer(
-       wdev, 0x2, &params, sizeof(params), sizeof(return_value),
-       &return_value, sizeof(return_value));
+		wdev, 0x2, &params, sizeof(params), sizeof(return_value),
+		&return_value, sizeof(return_value));
 	if (err)
 		return AE_ERROR;
 
@@ -734,8 +735,8 @@ static acpi_status wmid3_set_device_status(struct acer_wmi *acer, u32 value,
 		return AE_ERROR;
 
 	err = linuwu_sense_wmi_execute_buffer(
-       wdev, 0x2, &get_params, sizeof(get_params), sizeof(return_value),
-       &return_value, sizeof(return_value));
+		wdev, 0x2, &get_params, sizeof(get_params),
+		sizeof(return_value), &return_value, sizeof(return_value));
 	if (err)
 		return AE_ERROR;
 
@@ -748,14 +749,14 @@ static acpi_status wmid3_set_device_status(struct acer_wmi *acer, u32 value,
 	devices = return_value.devices;
 	set_params.devices = (value) ? (devices | device) : (devices & ~device);
 
-	err = linuwu_sense_wmi_execute_buffer(
-       wdev, 0x1, &set_params, sizeof(set_params), sizeof(u32),
-       set_return, sizeof(set_return));
+	err = linuwu_sense_wmi_execute_buffer(wdev, 0x1, &set_params,
+					      sizeof(set_params), sizeof(u32),
+					      set_return, sizeof(set_return));
 	if (err)
 		return AE_ERROR;
 
 	return_value.error_code = set_return[0];
-   return_value.ec_return_value = set_return[1];
+	return_value.ec_return_value = set_return[1];
 
 	if (return_value.error_code || return_value.ec_return_value)
 		pr_warn("Set Device Status failed: 0x%x - 0x%x\n",
@@ -821,8 +822,8 @@ static int WMID_set_capabilities(struct acer_wmi *acer)
 	if (!wdev)
 		return -ENODEV;
 
-	err = linuwu_sense_wmi_query_block(
-       wdev, 0, sizeof(devices), &devices, sizeof(devices));
+	err = linuwu_sense_wmi_query_block(wdev, 0, sizeof(devices), &devices,
+					   sizeof(devices));
 	if (err)
 		return err;
 
@@ -1156,9 +1157,9 @@ static void acer_kbd_dock_get_initial_state(struct acer_wmi *acer)
 	if (!wdev)
 		return;
 
-	err = linuwu_sense_wmi_execute_buffer(
-       wdev, 0x2, input, sizeof(input), sizeof(output), output,
-       sizeof(output));
+	err = linuwu_sense_wmi_execute_buffer(wdev, 0x2, input, sizeof(input),
+					      sizeof(output), output,
+					      sizeof(output));
 	if (err) {
 		pr_err("Error getting keyboard-dock initial status: %d\n", err);
 		return;
@@ -1495,9 +1496,9 @@ static int wmid3_set_function_mode(struct acer_wmi *acer,
 		return -ENODEV;
 
 	err = linuwu_sense_wmi_execute_buffer(
-       wdev, 0x1, params, sizeof(*params), sizeof(*return_value),
-       return_value, sizeof(*return_value));
-   return err;
+		wdev, 0x1, params, sizeof(*params), sizeof(*return_value),
+		return_value, sizeof(*return_value));
+	return err;
 }
 
 static int acer_wmi_enable_ec_raw(struct acer_wmi *acer)
@@ -1646,8 +1647,8 @@ static u32 get_wmid_devices(struct acer_wmi *acer)
 	if (!wdev)
 		return 0;
 
-	err = linuwu_sense_wmi_query_block(
-       wdev, 0, sizeof(devices), &devices, sizeof(devices));
+	err = linuwu_sense_wmi_query_block(wdev, 0, sizeof(devices), &devices,
+					   sizeof(devices));
 	if (err)
 		return 0;
 

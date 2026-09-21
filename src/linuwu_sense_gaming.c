@@ -416,8 +416,8 @@ int linuwu_sense_gaming_get_battery_mode(
 		return -ENODEV;
 
 	err = linuwu_sense_wmi_execute_buffer(
-       wdev, ACER_WMID_GET_BATTERY_HEALTH_CONTROL_STATUS_METHODID,
-       &params, sizeof(params), sizeof(ret), &ret, sizeof(ret));
+		wdev, ACER_WMID_GET_BATTERY_HEALTH_CONTROL_STATUS_METHODID,
+		&params, sizeof(params), sizeof(ret), &ret, sizeof(ret));
 	if (err) {
 		pr_err("Unexpected output getting battery health status: %d\n",
 		       err);
@@ -460,8 +460,8 @@ int linuwu_sense_gaming_set_battery_mode(
 		return -ENODEV;
 
 	err = linuwu_sense_wmi_execute_buffer(
-       wdev, ACER_WMID_SET_BATTERY_HEALTH_CONTROL_METHODID,
-       &params, sizeof(params), sizeof(ret), &ret, sizeof(ret));
+		wdev, ACER_WMID_SET_BATTERY_HEALTH_CONTROL_METHODID, &params,
+		sizeof(params), sizeof(ret), &ret, sizeof(ret));
 	if (err) {
 		pr_err("Unexpected output setting battery health status: %d\n",
 		       err);
@@ -490,8 +490,8 @@ int linuwu_sense_gaming_get_kb_backlight(
 		return -ENODEV;
 
 	err = linuwu_sense_wmi_execute_buffer(
-       wdev, ACER_WMID_GET_GAMING_KB_BACKLIGHT_METHODID,
-       &in, sizeof(in), sizeof(out), &out, sizeof(out));
+		wdev, ACER_WMID_GET_GAMING_KB_BACKLIGHT_METHODID, &in,
+		sizeof(in), sizeof(out), &out, sizeof(out));
 	if (err) {
 		pr_err("Unexpected output getting kb zone status: %d\n", err);
 		goto out;
@@ -532,8 +532,8 @@ int linuwu_sense_gaming_set_kb_backlight(
 	gmInput[9] = 1;
 
 	err = linuwu_sense_wmi_execute_buffer(
-       wdev, ACER_WMID_SET_GAMING_KB_BACKLIGHT_METHODID,
-       gmInput, sizeof(gmInput), sizeof(u32), &resp, sizeof(resp));
+		wdev, ACER_WMID_SET_GAMING_KB_BACKLIGHT_METHODID, gmInput,
+		sizeof(gmInput), sizeof(u32), &resp, sizeof(resp));
 	if (err)
 		goto out;
 
@@ -558,8 +558,8 @@ int linuwu_sense_gaming_get_kb_zone_color(struct acer_wmi *acer,
 		return -ENODEV;
 
 	err = linuwu_sense_wmi_execute_buffer(
-       wdev, ACER_WMID_GET_GAMING_RGB_KB_METHODID, &value,
-       sizeof(value), sizeof(u32), &value, sizeof(value));
+		wdev, ACER_WMID_GET_GAMING_RGB_KB_METHODID, &value,
+		sizeof(value), sizeof(u32), &value, sizeof(value));
 	if (err)
 		goto err_log;
 

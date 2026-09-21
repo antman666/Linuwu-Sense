@@ -48,7 +48,8 @@ out:
 }
 
 int linuwu_sense_wmi_query_block(struct wmi_device *wdev, u8 instance,
-					 size_t min_size, void *output, size_t output_size)
+				 size_t min_size, void *output,
+				 size_t output_size)
 {
 	struct wmi_buffer output_buf = {};
 	size_t copy_len;
