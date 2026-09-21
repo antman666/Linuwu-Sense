@@ -1808,8 +1808,7 @@ static ssize_t predator_battery_calibration_show(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_gaming_get_battery_mode(
-		acer, LINUWU_SENSE_GAMING_BATTERY_MODE_CALIBRATION,
-		&enabled);
+		acer, LINUWU_SENSE_GAMING_BATTERY_MODE_CALIBRATION, &enabled);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return -ENODEV;
@@ -1855,7 +1854,8 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 
 	if (t_cpu_fan_speed == 100 && t_gpu_fan_speed == 100) {
 		pr_info("MAX FAN MODE!\n");
-		status = linuwu_sense_fan_set_mode(wdev, acer->quirks->cpu_fans > 0,
+		status = linuwu_sense_fan_set_mode(wdev,
+						   acer->quirks->cpu_fans > 0,
 						   acer->quirks->gpu_fans > 0,
 						   LINUWU_SENSE_FAN_MODE_TURBO);
 		if (ACPI_FAILURE(status)) {
@@ -1865,7 +1865,8 @@ static acpi_status acer_set_fan_speed(struct acer_wmi *acer,
 		}
 	} else if (t_cpu_fan_speed == 0 && t_gpu_fan_speed == 0) {
 		pr_info("AUTO FAN MODE!\n");
-		status = linuwu_sense_fan_set_mode(wdev, acer->quirks->cpu_fans > 0,
+		status = linuwu_sense_fan_set_mode(wdev,
+						   acer->quirks->cpu_fans > 0,
 						   acer->quirks->gpu_fans > 0,
 						   LINUWU_SENSE_FAN_MODE_AUTO);
 		if (ACPI_FAILURE(status)) {

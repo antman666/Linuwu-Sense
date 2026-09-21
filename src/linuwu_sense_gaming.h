@@ -96,12 +96,12 @@ int linuwu_sense_gaming_get_usb_charging(struct acer_wmi *acer, int *percent);
 int linuwu_sense_gaming_set_usb_charging(struct acer_wmi *acer, u8 percent);
 
 /* Battery health control */
-int linuwu_sense_gaming_get_battery_mode(struct acer_wmi *acer,
-					 enum linuwu_sense_gaming_battery_mode mode,
-					 int *enabled);
-int linuwu_sense_gaming_set_battery_mode(struct acer_wmi *acer,
-					 enum linuwu_sense_gaming_battery_mode mode,
-					 u8 status);
+int linuwu_sense_gaming_get_battery_mode(
+	struct acer_wmi *acer, enum linuwu_sense_gaming_battery_mode mode,
+	int *enabled);
+int linuwu_sense_gaming_set_battery_mode(
+	struct acer_wmi *acer, enum linuwu_sense_gaming_battery_mode mode,
+	u8 status);
 
 /* Four zone keyboard backlight */
 int linuwu_sense_gaming_get_kb_backlight(

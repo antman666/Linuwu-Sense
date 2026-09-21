@@ -31,8 +31,9 @@ module_param(predator_v4, bool, 0444);
 module_param(nitro_v4, bool, 0444);
 MODULE_PARM_DESC(force_series, "Force a different laptop series");
 MODULE_PARM_DESC(force_caps, "Force the capability bitmask to this value");
-MODULE_PARM_DESC(predator_v4,
-		 "Enable features for predator laptops that use predator sense v4");
+MODULE_PARM_DESC(
+	predator_v4,
+	"Enable features for predator laptops that use predator sense v4");
 MODULE_PARM_DESC(nitro_v4,
 		 "Enable features for nitro laptops that use nitro sense v4");
 
@@ -543,7 +544,8 @@ const struct linuwu_sense_quirks *linuwu_sense_quirks_match(void)
 	} else if (!force_series) {
 		quirks = linuwu_sense_quirks_from_table(acer_quirks);
 		if (!quirks)
-			quirks = linuwu_sense_quirks_from_table(non_acer_quirks);
+			quirks =
+				linuwu_sense_quirks_from_table(non_acer_quirks);
 	} else if (force_series == 2490) {
 		quirks = &quirk_acer_travelmate_2490;
 	}
@@ -554,8 +556,7 @@ const struct linuwu_sense_quirks *linuwu_sense_quirks_match(void)
 	return quirks;
 }
 
-static int
-linuwu_sense_quirks_dmi_force_caps(const struct dmi_system_id *table)
+static int linuwu_sense_quirks_dmi_force_caps(const struct dmi_system_id *table)
 {
 	const struct dmi_system_id *entry;
 	const struct linuwu_sense_quirks *quirks;
