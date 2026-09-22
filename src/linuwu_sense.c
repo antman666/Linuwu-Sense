@@ -49,43 +49,6 @@ MODULE_LICENSE("GPL");
  */
 #define ACERWMID_EVENT_GUID "676AA15E-6A47-4D9F-A2CC-1E6D18D14026"
 
-enum acer_wmi_event_ids {
-	WMID_HOTKEY_EVENT = 0x1,
-	WMID_GAMING_TURBO_KEY_EVENT = 0x7,
-	WMID_AC_EVENT = 0x8,
-	WMID_BATTERY_BOOST_EVENT = 0x9,
-	WMID_CALIBRATION_EVENT = 0x0B,
-};
-
-/* Hotkey Customized Setting and Acer Application Status.
- * Set Device Default Value and Report Acer Application Status.
- * When Acer Application starts, it will run this method to inform
- * BIOS/EC that Acer Application is on.
- * App Status
- *	Bit[0]: Launch Manager Status
- *	Bit[1]: ePM Status
- *	Bit[2]: Device Control Status
- *	Bit[3]: Acer Power Button Utility Status
- *	Bit[4]: RF Button Status
- *	Bit[5]: ODD PM Status
- *	Bit[6]: Device Default Value Control
- *	Bit[7]: Hall Sensor Application Status
- */
-struct func_input_params {
-	u8 function_num; /* Function Number */
-	u16 commun_devices; /* Communication type devices default status */
-	u16 devices; /* Other type devices default status */
-	u8 app_status; /* Acer Device Status. LM, ePM, RF Button... */
-	u8 app_mask; /* Bit mask to app_status */
-	u8 reserved;
-} __packed;
-
-struct func_return_value {
-	u8 error_code; /* Error Code */
-	u8 ec_return_value; /* EC Return Value */
-	u16 reserved;
-} __packed;
-
 static bool ec_raw_mode;
 
 module_param(ec_raw_mode, bool, 0444);
@@ -200,7 +163,6 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 	struct acer_wmi_wdev *wdev_data = dev_get_drvdata(&wdev->dev);
 	struct acer_wmi *acer;
 	struct linuwu_sense_event event;
-	u16 device_state;
 	int err;
 
 	if (!wdev_data || wdev_data->guid != ACER_WMI_GUID_EVENT)
@@ -222,39 +184,25 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 		return;
 	}
 
-	switch (event.function) {
-	case WMID_HOTKEY_EVENT:
-		device_state = event.device_state;
-		pr_info("device state: 0x%x\n", device_state);
+	switch (event.type) {
+	case LINUWU_SENSE_EVENT_HOTKEY:
+		pr_info("device state: 0x%x\n", event.device_state);
 		linuwu_sense_input_report_hotkey(acer, event.key_num,
-						 device_state);
+						 event.device_state);
 		break;
-	case WMID_GAMING_TURBO_KEY_EVENT:
-		if (event.key_num == 0x5 &&
-		    has_cap(acer, ACER_CAP_PLATFORM_PROFILE))
+	case LINUWU_SENSE_EVENT_PROFILE_CYCLE:
+		if (has_cap(acer, ACER_CAP_PLATFORM_PROFILE))
 			linuwu_sense_profile_cycle(acer);
 		break;
-	case WMID_AC_EVENT:
+	case LINUWU_SENSE_EVENT_POWER_SOURCE:
 		if (acer->quirks->predator_v4 &&
-		    has_cap(acer, ACER_CAP_PLATFORM_PROFILE)) {
-			if (event.key_num > 1) {
-				pr_info("Unknown AC event key number - %d\n",
-					event.key_num);
-				break;
-			}
-
-			/*
-			 * The event reports key_num 1 while the AC
-			 * adapter is connected and 0 while it is
-			 * disconnected.
-			 */
-			linuwu_sense_profile_power_source_changed(
-				acer, event.key_num != 0);
-		}
+		    has_cap(acer, ACER_CAP_PLATFORM_PROFILE))
+			linuwu_sense_profile_power_source_changed(acer,
+								  event.on_ac);
 		break;
-	case WMID_BATTERY_BOOST_EVENT:
+	case LINUWU_SENSE_EVENT_BATTERY_BOOST:
 		break;
-	case WMID_CALIBRATION_EVENT:
+	case LINUWU_SENSE_EVENT_CALIBRATION:
 		if (has_cap(acer, ACER_CAP_PREDATOR_SENSE) ||
 		    has_cap(acer, ACER_CAP_NITRO_SENSE) ||
 		    has_cap(acer, ACER_CAP_NITRO_SENSE_V4)) {
@@ -262,122 +210,18 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 			err = linuwu_sense_battery_set_mode(
 				acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
 				LINUWU_SENSE_BATTERY_MODE_CALIBRATION,
-				event.key_num);
+				event.enabled);
 			mutex_unlock(&acer->lock);
 			if (err)
 				pr_err("Error changing calibration state\n");
 		}
 		break;
 	default:
-		pr_warn("Unknown function number - %d - %d\n", event.function,
-			event.key_num);
+		pr_warn("Unknown event\n");
 		break;
 	}
 
 	mutex_unlock(&acer->event_lock);
-}
-
-static int wmid3_set_function_mode(struct acer_wmi *acer,
-				   struct func_input_params *params,
-				   struct func_return_value *return_value)
-{
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
-	struct wmi_buffer input = {
-		.length = sizeof(*params),
-		.data = params,
-	};
-	struct wmi_buffer output = {};
-	int err;
-
-	if (!wdev)
-		return -ENODEV;
-
-	err = wmidev_invoke_method(wdev, 0, 0x1, &input, &output,
-				   sizeof(*return_value));
-	if (err)
-		return err;
-
-	if (output.length < sizeof(*return_value)) {
-		err = -EIO;
-		goto out;
-	}
-
-	memcpy(return_value, output.data, sizeof(*return_value));
-
-out:
-	kfree(output.data);
-	return err;
-}
-
-static int acer_wmi_enable_ec_raw(struct acer_wmi *acer)
-{
-	struct func_return_value return_value;
-	struct func_input_params params = {
-		.function_num = 0x1,
-		.commun_devices = 0xFFFF,
-		.devices = 0xFFFF,
-		.app_status = 0x00, /* Launch Manager Deactive */
-		.app_mask = 0x01,
-	};
-	int err;
-
-	err = wmid3_set_function_mode(acer, &params, &return_value);
-	if (err)
-		return err;
-
-	if (return_value.error_code || return_value.ec_return_value)
-		pr_warn("Enabling EC raw mode failed: 0x%x - 0x%x\n",
-			return_value.error_code, return_value.ec_return_value);
-	else
-		pr_info("Enabled EC raw mode\n");
-
-	return 0;
-}
-
-static int acer_wmi_enable_lm(struct acer_wmi *acer)
-{
-	struct func_return_value return_value;
-	struct func_input_params params = {
-		.function_num = 0x1,
-		.commun_devices = 0xFFFF,
-		.devices = 0xFFFF,
-		.app_status = 0x01, /* Launch Manager Active */
-		.app_mask = 0x01,
-	};
-	int err;
-
-	err = wmid3_set_function_mode(acer, &params, &return_value);
-	if (err)
-		return err;
-
-	if (return_value.error_code || return_value.ec_return_value)
-		pr_warn("Enabling Launch Manager failed: 0x%x - 0x%x\n",
-			return_value.error_code, return_value.ec_return_value);
-
-	return 0;
-}
-
-static int acer_wmi_enable_rf_button(struct acer_wmi *acer)
-{
-	struct func_return_value return_value;
-	struct func_input_params params = {
-		.function_num = 0x1,
-		.commun_devices = 0xFFFF,
-		.devices = 0xFFFF,
-		.app_status = 0x10, /* RF Button Active */
-		.app_mask = 0x10,
-	};
-	int err;
-
-	err = wmid3_set_function_mode(acer, &params, &return_value);
-	if (err)
-		return err;
-
-	if (return_value.error_code || return_value.ec_return_value)
-		pr_warn("Enabling RF Button failed: 0x%x - 0x%x\n",
-			return_value.error_code, return_value.ec_return_value);
-
-	return 0;
 }
 
 /*
@@ -1384,15 +1228,15 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 
 	if (acer->wdevs[ACER_WMI_GUID_WMID_APGE] &&
 	    (acer->capability & ACER_CAP_SET_FUNCTION_MODE)) {
-		if (acer_wmi_enable_rf_button(acer))
+		if (linuwu_sense_gaming_enable_rf_button(acer))
 			pr_warn("Cannot enable RF Button Driver\n");
 
 		if (ec_raw_mode) {
-			if (acer_wmi_enable_ec_raw(acer)) {
+			if (linuwu_sense_gaming_enable_ec_raw(acer)) {
 				pr_err("Cannot enable EC raw mode\n");
 				return -ENODEV;
 			}
-		} else if (acer_wmi_enable_lm(acer)) {
+		} else if (linuwu_sense_gaming_enable_launch_manager(acer)) {
 			pr_err("Cannot enable Launch Manager mode\n");
 			return -ENODEV;
 		}

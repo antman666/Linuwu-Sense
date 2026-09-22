@@ -10,9 +10,11 @@
 #include <linux/device.h>
 #include <linux/hwmon.h>
 #include <linux/kernel.h>
+#include <linux/mutex.h>
 #include <linux/slab.h>
 #include <linux/units.h>
 
+#include "linuwu_sense.h"
 #include "linuwu_sense_gaming.h"
 #include "linuwu_sense_hwmon.h"
 
@@ -71,25 +73,27 @@ static int acer_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 	switch (type) {
 	case hwmon_temp:
 		sensor = acer_wmi_temp_channel_to_sensor[channel];
-		ret = linuwu_sense_gaming_read_sensor(hwmon->acer, sensor,
-						      &value);
-		if (ret < 0)
-			return ret;
-
-		*val = value * MILLIDEGREE_PER_DEGREE;
-		return 0;
+		break;
 	case hwmon_fan:
 		sensor = acer_wmi_fan_channel_to_sensor[channel];
-		ret = linuwu_sense_gaming_read_sensor(hwmon->acer, sensor,
-						      &value);
-		if (ret < 0)
-			return ret;
-
-		*val = value;
-		return 0;
+		break;
 	default:
 		return -EOPNOTSUPP;
 	}
+
+	/* The sensor query is a WMI operation of the Acer gaming backend. */
+	mutex_lock(&hwmon->acer->lock);
+	ret = linuwu_sense_gaming_read_sensor(hwmon->acer, sensor, &value);
+	mutex_unlock(&hwmon->acer->lock);
+	if (ret < 0)
+		return ret;
+
+	if (type == hwmon_temp)
+		*val = value * MILLIDEGREE_PER_DEGREE;
+	else
+		*val = value;
+
+	return 0;
 }
 
 static const struct hwmon_channel_info *const acer_wmi_hwmon_info[] = {
@@ -119,8 +123,10 @@ int acer_wmi_hwmon_init(struct acer_wmi *acer, struct device *dev)
 
 	hwmon_data->acer = acer;
 
+	mutex_lock(&acer->lock);
 	ret = linuwu_sense_gaming_get_supported_sensors(
 		acer, &hwmon_data->supported_sensors);
+	mutex_unlock(&acer->lock);
 	if (ret < 0)
 		return ret;
 

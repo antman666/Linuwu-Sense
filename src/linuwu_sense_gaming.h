@@ -5,21 +5,10 @@
 #ifndef _LINUWU_SENSE_GAMING_H_
 #define _LINUWU_SENSE_GAMING_H_
 
+#include <linux/platform_profile.h>
 #include <linux/types.h>
 
 struct acer_wmi;
-
-/*
- * Predator thermal profiles as understood by the Predator Gaming WMI
- * interface.
- */
-enum acer_predator_v4_thermal_profile {
-	ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET = 0x00,
-	ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED = 0x01,
-	ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE = 0x04,
-	ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO = 0x05,
-	ACER_PREDATOR_V4_THERMAL_PROFILE_ECO = 0x06,
-};
 
 /*
  * Sensors of the Predator Gaming "get system info" command. The values are
@@ -35,28 +24,35 @@ enum linuwu_sense_gaming_sensor {
 
 /*
  * Locking: every function below has to be called with acer->lock held. The
- * only exceptions are the read-only queries:
+ * only exception is linuwu_sense_gaming_sensor_is_supported(), which is a
+ * pure predicate.
  *
- *  - linuwu_sense_gaming_get_supported_sensors() and
- *    linuwu_sense_gaming_read_sensor() are also called from the hwmon path
- *    without holding acer->lock.
- *  - linuwu_sense_gaming_sensor_is_supported() is a pure predicate.
- *  - linuwu_sense_gaming_get_supported_thermal_profiles() is called from the
- *    platform_profile probe callback without holding acer->lock.
- *
- * None of these commands touches any cached driver state. The WMI device is
- * resolved at call time, and the ACPI interpreter serializes the AML method
- * execution.
+ * None of these commands touches any cached driver state: the WMI device is
+ * resolved at call time, and the Acer firmware profile encoding stays inside
+ * this backend. acer->lock is the serialization domain for the Acer WMI
+ * operations of the control surface, the WMI event path and the Linux
+ * subsystem frontends.
  */
 
 /* Whether the machine currently runs on AC power. */
 int linuwu_sense_gaming_get_power_source(struct acer_wmi *acer, bool *on_ac);
 
-/* Predator thermal profile */
-int linuwu_sense_gaming_get_thermal_profile(struct acer_wmi *acer, u8 *profile);
-int linuwu_sense_gaming_set_thermal_profile(struct acer_wmi *acer, u8 profile);
+/* The system function commands of the WMID APGE device. */
+int linuwu_sense_gaming_enable_ec_raw(struct acer_wmi *acer);
+int linuwu_sense_gaming_enable_launch_manager(struct acer_wmi *acer);
+int linuwu_sense_gaming_enable_rf_button(struct acer_wmi *acer);
+
+/*
+ * Predator thermal profile. The frontend uses the Linux platform_profile
+ * choices, the mapping onto the firmware profile IDs happens inside the
+ * backend.
+ */
+int linuwu_sense_gaming_get_thermal_profile(
+	struct acer_wmi *acer, enum platform_profile_option *profile);
+int linuwu_sense_gaming_set_thermal_profile(
+	struct acer_wmi *acer, enum platform_profile_option profile);
 int linuwu_sense_gaming_get_supported_thermal_profiles(struct acer_wmi *acer,
-						       unsigned long *profiles);
+						       unsigned long *choices);
 
 /* LCD override */
 int linuwu_sense_gaming_get_lcd_override(struct acer_wmi *acer, int *state);

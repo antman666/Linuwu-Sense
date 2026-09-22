@@ -11,8 +11,10 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/bitfield.h>
+#include <linux/bitops.h>
 #include <linux/kernel.h>
 #include <linux/slab.h>
+#include <linux/string.h>
 #include <linux/types.h>
 #include <linux/unaligned.h>
 #include <linux/wmi.h>
@@ -34,6 +36,145 @@
  */
 #define ACER_WMID_SET_FUNCTION 1
 #define ACER_WMID_GET_FUNCTION 2
+
+/*
+ * The system function command of the WMID APGE device.
+ *
+ * Hotkey Customized Setting and Acer Application Status.
+ * Set Device Default Value and Report Acer Application Status.
+ * When Acer Application starts, it will run this method to inform
+ * BIOS/EC that Acer Application is on.
+ * App Status
+ *	Bit[0]: Launch Manager Status
+ *	Bit[1]: ePM Status
+ *	Bit[2]: Device Control Status
+ *	Bit[3]: Acer Power Button Utility Status
+ *	Bit[4]: RF Button Status
+ *	Bit[5]: ODD PM Status
+ *	Bit[6]: Device Default Value Control
+ *	Bit[7]: Hall Sensor Application Status
+ */
+struct func_input_params {
+	u8 function_num; /* Function Number */
+	u16 commun_devices; /* Communication type devices default status */
+	u16 devices; /* Other type devices default status */
+	u8 app_status; /* Acer Device Status. LM, ePM, RF Button... */
+	u8 app_mask; /* Bit mask to app_status */
+	u8 reserved;
+} __packed;
+
+struct func_return_value {
+	u8 error_code; /* Error Code */
+	u8 ec_return_value; /* EC Return Value */
+	u16 reserved;
+} __packed;
+
+static int
+linuwu_sense_gaming_set_function_mode(struct acer_wmi *acer,
+				      struct func_input_params *params,
+				      struct func_return_value *return_value)
+{
+	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
+	struct wmi_buffer input = {
+		.length = sizeof(*params),
+		.data = params,
+	};
+	struct wmi_buffer output = {};
+	int err;
+
+	if (!wdev)
+		return -ENODEV;
+
+	err = wmidev_invoke_method(wdev, 0, ACER_WMID_SET_FUNCTION, &input,
+				   &output, sizeof(*return_value));
+	if (err)
+		return err;
+
+	if (output.length < sizeof(*return_value)) {
+		err = -EIO;
+		goto out;
+	}
+
+	memcpy(return_value, output.data, sizeof(*return_value));
+
+out:
+	kfree(output.data);
+	return err;
+}
+
+int linuwu_sense_gaming_enable_ec_raw(struct acer_wmi *acer)
+{
+	struct func_return_value return_value;
+	struct func_input_params params = {
+		.function_num = 0x1,
+		.commun_devices = 0xFFFF,
+		.devices = 0xFFFF,
+		.app_status = 0x00, /* Launch Manager Deactive */
+		.app_mask = 0x01,
+	};
+	int err;
+
+	err = linuwu_sense_gaming_set_function_mode(acer, &params,
+						    &return_value);
+	if (err)
+		return err;
+
+	if (return_value.error_code || return_value.ec_return_value)
+		pr_warn("Enabling EC raw mode failed: 0x%x - 0x%x\n",
+			return_value.error_code, return_value.ec_return_value);
+	else
+		pr_info("Enabled EC raw mode\n");
+
+	return 0;
+}
+
+int linuwu_sense_gaming_enable_launch_manager(struct acer_wmi *acer)
+{
+	struct func_return_value return_value;
+	struct func_input_params params = {
+		.function_num = 0x1,
+		.commun_devices = 0xFFFF,
+		.devices = 0xFFFF,
+		.app_status = 0x01, /* Launch Manager Active */
+		.app_mask = 0x01,
+	};
+	int err;
+
+	err = linuwu_sense_gaming_set_function_mode(acer, &params,
+						    &return_value);
+	if (err)
+		return err;
+
+	if (return_value.error_code || return_value.ec_return_value)
+		pr_warn("Enabling Launch Manager failed: 0x%x - 0x%x\n",
+			return_value.error_code, return_value.ec_return_value);
+
+	return 0;
+}
+
+int linuwu_sense_gaming_enable_rf_button(struct acer_wmi *acer)
+{
+	struct func_return_value return_value;
+	struct func_input_params params = {
+		.function_num = 0x1,
+		.commun_devices = 0xFFFF,
+		.devices = 0xFFFF,
+		.app_status = 0x10, /* RF Button Active */
+		.app_mask = 0x10,
+	};
+	int err;
+
+	err = linuwu_sense_gaming_set_function_mode(acer, &params,
+						    &return_value);
+	if (err)
+		return err;
+
+	if (return_value.error_code || return_value.ec_return_value)
+		pr_warn("Enabling RF Button failed: 0x%x - 0x%x\n",
+			return_value.error_code, return_value.ec_return_value);
+
+	return 0;
+}
 
 /*
  * Command values of the "get system info" method
@@ -251,25 +392,124 @@ static int linuwu_sense_gaming_get_misc_setting(struct acer_wmi *acer,
 	return 0;
 }
 
-int linuwu_sense_gaming_get_thermal_profile(struct acer_wmi *acer, u8 *profile)
+/*
+ * Predator thermal profiles as understood by the Predator Gaming WMI
+ * interface.
+ */
+enum acer_predator_v4_thermal_profile {
+	ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET = 0x00,
+	ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED = 0x01,
+	ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE = 0x04,
+	ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO = 0x05,
+	ACER_PREDATOR_V4_THERMAL_PROFILE_ECO = 0x06,
+};
+
+static int
+linuwu_sense_gaming_profile_to_acer(enum platform_profile_option profile,
+				    u8 *acer_profile)
 {
-	return linuwu_sense_gaming_get_misc_setting(
-		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, profile);
+	switch (profile) {
+	case PLATFORM_PROFILE_LOW_POWER:
+		*acer_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_ECO;
+		break;
+	case PLATFORM_PROFILE_QUIET:
+		*acer_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET;
+		break;
+	case PLATFORM_PROFILE_BALANCED:
+		*acer_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED;
+		break;
+	case PLATFORM_PROFILE_BALANCED_PERFORMANCE:
+		*acer_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE;
+		break;
+	case PLATFORM_PROFILE_PERFORMANCE:
+		*acer_profile = ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
 }
 
-int linuwu_sense_gaming_set_thermal_profile(struct acer_wmi *acer, u8 profile)
+static int
+linuwu_sense_gaming_profile_from_acer(u8 acer_profile,
+				      enum platform_profile_option *profile)
 {
+	switch (acer_profile) {
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO:
+		*profile = PLATFORM_PROFILE_PERFORMANCE;
+		break;
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE:
+		*profile = PLATFORM_PROFILE_BALANCED_PERFORMANCE;
+		break;
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED:
+		*profile = PLATFORM_PROFILE_BALANCED;
+		break;
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET:
+		*profile = PLATFORM_PROFILE_QUIET;
+		break;
+	case ACER_PREDATOR_V4_THERMAL_PROFILE_ECO:
+		*profile = PLATFORM_PROFILE_LOW_POWER;
+		break;
+	default:
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
+}
+
+int linuwu_sense_gaming_get_thermal_profile(
+	struct acer_wmi *acer, enum platform_profile_option *profile)
+{
+	u8 acer_profile;
+	int err;
+
+	err = linuwu_sense_gaming_get_misc_setting(
+		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, &acer_profile);
+	if (err)
+		return err;
+
+	return linuwu_sense_gaming_profile_from_acer(acer_profile, profile);
+}
+
+int linuwu_sense_gaming_set_thermal_profile(
+	struct acer_wmi *acer, enum platform_profile_option profile)
+{
+	u8 acer_profile;
+	int err;
+
+	err = linuwu_sense_gaming_profile_to_acer(profile, &acer_profile);
+	if (err)
+		return err;
+
 	return linuwu_sense_gaming_set_misc_setting(
-		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, profile);
+		acer, ACER_WMID_MISC_SETTING_PLATFORM_PROFILE, acer_profile);
 }
 
 int linuwu_sense_gaming_get_supported_thermal_profiles(struct acer_wmi *acer,
-						       unsigned long *profiles)
+						       unsigned long *choices)
 {
-	/* The bitmap is returned as a single byte */
-	return linuwu_sense_gaming_get_misc_setting(
-		acer, ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES,
-		(u8 *)profiles);
+	u8 supported = 0;
+	int err;
+
+	/* The firmware bitmap is returned as a single byte */
+	err = linuwu_sense_gaming_get_misc_setting(
+		acer, ACER_WMID_MISC_SETTING_SUPPORTED_PROFILES, &supported);
+	if (err)
+		return err;
+
+	if (supported & BIT(ACER_PREDATOR_V4_THERMAL_PROFILE_ECO))
+		set_bit(PLATFORM_PROFILE_LOW_POWER, choices);
+	if (supported & BIT(ACER_PREDATOR_V4_THERMAL_PROFILE_QUIET))
+		set_bit(PLATFORM_PROFILE_QUIET, choices);
+	if (supported & BIT(ACER_PREDATOR_V4_THERMAL_PROFILE_BALANCED))
+		set_bit(PLATFORM_PROFILE_BALANCED, choices);
+	if (supported & BIT(ACER_PREDATOR_V4_THERMAL_PROFILE_PERFORMANCE))
+		set_bit(PLATFORM_PROFILE_BALANCED_PERFORMANCE, choices);
+	if (supported & BIT(ACER_PREDATOR_V4_THERMAL_PROFILE_TURBO))
+		set_bit(PLATFORM_PROFILE_PERFORMANCE, choices);
+
+	return 0;
 }
 
 int linuwu_sense_gaming_get_lcd_override(struct acer_wmi *acer, int *state)

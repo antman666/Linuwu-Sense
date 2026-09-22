@@ -10,14 +10,33 @@
 struct wmi_buffer;
 
 /*
- * Decoded representation of an Acer WMID event. @function and @key_num keep
- * the firmware encoding, the interpretation of these values is left to the
- * core driver.
+ * Semantic events decoded from the Acer WMID event payload. The mapping from
+ * the firmware event encoding onto these types is owned by the parser in
+ * linuwu_sense_event.c, the core driver only dispatches on the result.
+ */
+enum linuwu_sense_event_type {
+	LINUWU_SENSE_EVENT_UNKNOWN,
+	LINUWU_SENSE_EVENT_HOTKEY,
+	LINUWU_SENSE_EVENT_PROFILE_CYCLE,
+	LINUWU_SENSE_EVENT_POWER_SOURCE,
+	LINUWU_SENSE_EVENT_BATTERY_BOOST,
+	LINUWU_SENSE_EVENT_CALIBRATION,
+};
+
+/*
+ * Decoded representation of an Acer WMID event.
+ *
+ * @key_num and @device_state are only valid for LINUWU_SENSE_EVENT_HOTKEY.
+ * They keep the firmware encoding because the input frontend owns the hotkey
+ * keymap. @on_ac is only valid for LINUWU_SENSE_EVENT_POWER_SOURCE and
+ * @enabled is only valid for LINUWU_SENSE_EVENT_CALIBRATION.
  */
 struct linuwu_sense_event {
-	u8 function;
+	enum linuwu_sense_event_type type;
 	u8 key_num;
 	u16 device_state;
+	bool on_ac;
+	bool enabled;
 };
 
 /*
