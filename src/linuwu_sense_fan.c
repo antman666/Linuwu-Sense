@@ -28,7 +28,7 @@
 #define ACER_GAMING_FAN_SPEED_CPU_ID 0x01
 #define ACER_GAMING_FAN_SPEED_GPU_ID 0x04
 
-int linuwu_sense_fan_set_behavior(struct wmi_device *wdev, u64 behavior)
+static int linuwu_sense_fan_set_behavior(struct wmi_device *wdev, u64 behavior)
 {
 	struct wmi_buffer input = {
 		.length = sizeof(behavior),
@@ -58,8 +58,7 @@ int linuwu_sense_fan_set_behavior(struct wmi_device *wdev, u64 behavior)
 }
 
 int linuwu_sense_fan_set_mode(struct wmi_device *wdev, bool cpu_fan,
-			      bool gpu_fan,
-			      enum linuwu_sense_fan_mode fan_mode)
+			      bool gpu_fan, enum linuwu_sense_fan_mode fan_mode)
 {
 	u16 fan_bitmap = 0;
 	u64 behavior = 0;
@@ -148,8 +147,7 @@ int linuwu_sense_fan_get_mode(struct wmi_device *wdev,
 }
 
 int linuwu_sense_fan_set_speed(struct wmi_device *wdev,
-			       enum linuwu_sense_fan fan,
-			       int percentage)
+			       enum linuwu_sense_fan fan, int percentage)
 {
 	struct wmi_buffer input = {};
 	struct wmi_buffer output = {};

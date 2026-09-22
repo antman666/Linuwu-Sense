@@ -12,10 +12,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/device.h>
-#include <linux/fs.h>
 #include <linux/init.h>
-#include <linux/input.h>
-#include <linux/input/sparse-keymap.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
@@ -26,10 +23,13 @@
 #include <linux/wmi.h>
 
 #include "linuwu_sense.h"
+#include "linuwu_sense_battery.h"
 #include "linuwu_sense_event.h"
 #include "linuwu_sense_fan.h"
 #include "linuwu_sense_gaming.h"
 #include "linuwu_sense_hwmon.h"
+#include "linuwu_sense_input.h"
+#include "linuwu_sense_keyboard.h"
 #include "linuwu_sense_profile.h"
 #include "linuwu_sense_quirks.h"
 
@@ -44,7 +44,6 @@ MODULE_LICENSE("GPL");
 #define WMID_GUID4 "7A4DDFE7-5B5D-40B4-8595-4408E0CC7F56"
 #define WMID_GUID5 "79772EC5-04B1-4bfd-843C-61E7F77B6CC9"
 
-#define KB_STATE_FILE "/etc/four_zone_kb_state"
 /*
  * Acer ACPI event GUIDs
  */
@@ -57,57 +56,6 @@ enum acer_wmi_event_ids {
 	WMID_BATTERY_BOOST_EVENT = 0x9,
 	WMID_CALIBRATION_EVENT = 0x0B,
 };
-
-static const struct key_entry acer_wmi_keymap[] = {
-	{ KE_KEY, 0x01, { KEY_WLAN } }, /* WiFi */
-	{ KE_KEY, 0x03, { KEY_WLAN } }, /* WiFi */
-	{ KE_KEY, 0x04, { KEY_WLAN } }, /* WiFi */
-	{ KE_KEY, 0x12, { KEY_BLUETOOTH } }, /* BT */
-	{ KE_KEY, 0x21, { KEY_PROG1 } }, /* Backup */
-	{ KE_KEY, 0x22, { KEY_PROG2 } }, /* Arcade */
-	{ KE_KEY, 0x23, { KEY_PROG3 } }, /* P_Key */
-	{ KE_KEY, 0x24, { KEY_PROG4 } }, /* Social networking_Key */
-	{ KE_KEY, 0x27, { KEY_HELP } },
-	{ KE_KEY, 0x29, { KEY_PROG3 } }, /* P_Key for TM8372 */
-	{ KE_IGNORE, 0x41, { KEY_MUTE } },
-	{ KE_IGNORE, 0x42, { KEY_PREVIOUSSONG } },
-	{ KE_IGNORE, 0x4d, { KEY_PREVIOUSSONG } },
-	{ KE_IGNORE, 0x43, { KEY_NEXTSONG } },
-	{ KE_IGNORE, 0x4e, { KEY_NEXTSONG } },
-	{ KE_IGNORE, 0x44, { KEY_PLAYPAUSE } },
-	{ KE_IGNORE, 0x4f, { KEY_PLAYPAUSE } },
-	{ KE_IGNORE, 0x45, { KEY_STOP } },
-	{ KE_IGNORE, 0x50, { KEY_STOP } },
-	{ KE_IGNORE, 0x48, { KEY_VOLUMEUP } },
-	{ KE_IGNORE, 0x49, { KEY_VOLUMEDOWN } },
-	{ KE_IGNORE, 0x4a, { KEY_VOLUMEDOWN } },
-	/*
-     * 0x61 is KEY_SWITCHVIDEOMODE. Usually this is a duplicate input event
-     * with the "Video Bus" input device events. But sometimes it is not
-     * a dup. Map it to KEY_UNKNOWN instead of using KE_IGNORE so that
-     * udev/hwdb can override it on systems where it is not a dup.
-     */
-	{ KE_KEY, 0x61, { KEY_UNKNOWN } },
-	{ KE_IGNORE, 0x62, { KEY_BRIGHTNESSUP } },
-	{ KE_IGNORE, 0x63, { KEY_BRIGHTNESSDOWN } },
-	{ KE_KEY, 0x64, { KEY_SWITCHVIDEOMODE } }, /* Display Switch */
-	{ KE_IGNORE, 0x81, { KEY_SLEEP } },
-	{ KE_KEY, 0x82, { KEY_TOUCHPAD_TOGGLE } }, /* Touch Pad Toggle */
-	{ KE_IGNORE, 0x84, { KEY_KBDILLUMTOGGLE } }, /* Automatic Keyboard
-                                                    background light toggle */
-	{ KE_KEY, KEY_TOUCHPAD_ON, { KEY_TOUCHPAD_ON } },
-	{ KE_KEY, KEY_TOUCHPAD_OFF, { KEY_TOUCHPAD_OFF } },
-	{ KE_IGNORE, 0x83, { KEY_TOUCHPAD_TOGGLE } },
-	{ KE_KEY, 0x85, { KEY_TOUCHPAD_TOGGLE } },
-	{ KE_KEY, 0x86, { KEY_WLAN } },
-	{ KE_KEY, 0x87, { KEY_POWER } },
-	{ KE_END, 0 }
-};
-
-/*
- * GUID3 device flags
- */
-#define ACER_WMID3_GDS_TOUCHPAD (1 << 1) /* Touchpad */
 
 /* Hotkey Customized Setting and Acer Application Status.
  * Set Device Default Value and Report Acer Application Status.
@@ -252,9 +200,7 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 	struct acer_wmi_wdev *wdev_data = dev_get_drvdata(&wdev->dev);
 	struct acer_wmi *acer;
 	struct linuwu_sense_event event;
-	const struct key_entry *key;
 	u16 device_state;
-	u32 scancode;
 	int err;
 
 	if (!wdev_data || wdev_data->guid != ACER_WMI_GUID_EVENT)
@@ -280,25 +226,8 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 	case WMID_HOTKEY_EVENT:
 		device_state = event.device_state;
 		pr_info("device state: 0x%x\n", device_state);
-
-		if (!acer->input_dev)
-			break;
-
-		key = sparse_keymap_entry_from_scancode(acer->input_dev,
-							event.key_num);
-		if (!key) {
-			pr_warn("Unknown key number - 0x%x\n",
-				event.key_num);
-		} else {
-			scancode = event.key_num;
-			if (key->keycode == KEY_TOUCHPAD_TOGGLE)
-				scancode = (device_state &
-					    ACER_WMID3_GDS_TOUCHPAD) ?
-						   KEY_TOUCHPAD_ON :
-						   KEY_TOUCHPAD_OFF;
-			sparse_keymap_report_event(acer->input_dev, scancode, 1,
-						   true);
-		}
+		linuwu_sense_input_report_hotkey(acer, event.key_num,
+						 device_state);
 		break;
 	case WMID_GAMING_TURBO_KEY_EVENT:
 		if (event.key_num == 0x5 &&
@@ -330,9 +259,9 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 		    has_cap(acer, ACER_CAP_NITRO_SENSE) ||
 		    has_cap(acer, ACER_CAP_NITRO_SENSE_V4)) {
 			mutex_lock(&acer->lock);
-			err = linuwu_sense_gaming_set_battery_mode(
-				acer,
-				LINUWU_SENSE_GAMING_BATTERY_MODE_CALIBRATION,
+			err = linuwu_sense_battery_set_mode(
+				acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+				LINUWU_SENSE_BATTERY_MODE_CALIBRATION,
 				event.key_num);
 			mutex_unlock(&acer->lock);
 			if (err)
@@ -340,8 +269,8 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 		}
 		break;
 	default:
-		pr_warn("Unknown function number - %d - %d\n",
-			event.function, event.key_num);
+		pr_warn("Unknown function number - %d - %d\n", event.function,
+			event.key_num);
 		break;
 	}
 
@@ -451,29 +380,6 @@ static int acer_wmi_enable_rf_button(struct acer_wmi *acer)
 	return 0;
 }
 
-static int acer_wmi_input_setup(struct acer_wmi *acer)
-{
-	int err;
-
-	acer->input_dev = devm_input_allocate_device(acer->dev);
-	if (!acer->input_dev)
-		return -ENOMEM;
-
-	acer->input_dev->name = "Acer WMI hotkeys";
-	acer->input_dev->phys = "wmi/input0";
-	acer->input_dev->id.bustype = BUS_HOST;
-
-	err = sparse_keymap_setup(acer->input_dev, acer_wmi_keymap, NULL);
-	if (err)
-		return err;
-
-	err = input_register_device(acer->input_dev);
-	if (err)
-		return err;
-
-	return 0;
-}
-
 /*
  * USB Charging
  */
@@ -486,7 +392,8 @@ static ssize_t predator_usb_charging_show(struct device *dev,
 	int err;
 
 	mutex_lock(&acer->lock);
-	err = linuwu_sense_gaming_get_usb_charging(acer, &percent);
+	err = linuwu_sense_battery_get_usb_charging(
+		acer->wdevs[ACER_WMI_GUID_WMID_APGE], &percent);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return -ENODEV;
@@ -508,7 +415,8 @@ static ssize_t predator_usb_charging_store(struct device *dev,
 		return -EINVAL;
 
 	mutex_lock(&acer->lock);
-	err = linuwu_sense_gaming_set_usb_charging(acer, val);
+	err = linuwu_sense_battery_set_usb_charging(
+		acer->wdevs[ACER_WMI_GUID_WMID_APGE], val);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return -ENODEV;
@@ -529,8 +437,9 @@ static ssize_t predator_battery_limit_show(struct device *dev,
 	int err;
 
 	mutex_lock(&acer->lock);
-	err = linuwu_sense_gaming_get_battery_mode(
-		acer, LINUWU_SENSE_GAMING_BATTERY_MODE_HEALTH, &enabled);
+	err = linuwu_sense_battery_get_mode(
+		acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+		LINUWU_SENSE_BATTERY_MODE_HEALTH, &enabled);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return -ENODEV;
@@ -553,8 +462,9 @@ static ssize_t predator_battery_limit_store(struct device *dev,
 		return -EINVAL;
 
 	mutex_lock(&acer->lock);
-	err = linuwu_sense_gaming_set_battery_mode(
-		acer, LINUWU_SENSE_GAMING_BATTERY_MODE_HEALTH, val);
+	err = linuwu_sense_battery_set_mode(
+		acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+		LINUWU_SENSE_BATTERY_MODE_HEALTH, val);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return -ENODEV;
@@ -571,8 +481,9 @@ static ssize_t predator_battery_calibration_show(struct device *dev,
 	int err;
 
 	mutex_lock(&acer->lock);
-	err = linuwu_sense_gaming_get_battery_mode(
-		acer, LINUWU_SENSE_GAMING_BATTERY_MODE_CALIBRATION, &enabled);
+	err = linuwu_sense_battery_get_mode(
+		acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+		LINUWU_SENSE_BATTERY_MODE_CALIBRATION, &enabled);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return -ENODEV;
@@ -595,8 +506,9 @@ static ssize_t preadtor_battery_calibration_store(struct device *dev,
 		return -EINVAL;
 
 	mutex_lock(&acer->lock);
-	err = linuwu_sense_gaming_set_battery_mode(
-		acer, LINUWU_SENSE_GAMING_BATTERY_MODE_CALIBRATION, val);
+	err = linuwu_sense_battery_set_mode(
+		acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+		LINUWU_SENSE_BATTERY_MODE_CALIBRATION, val);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return -ENODEV;
@@ -1067,452 +979,6 @@ static struct attribute_group nitro_sense_attr_group = {
 	.attrs = nitro_sense_attrs
 };
 
-/* four zone mode */
-static ssize_t four_zoned_rgb_kb_show(struct device *dev,
-				      struct device_attribute *attr, char *buf)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	struct linuwu_sense_gaming_kb_backlight output;
-	int err;
-
-	mutex_lock(&acer->lock);
-	err = linuwu_sense_gaming_get_kb_backlight(acer, &output);
-	mutex_unlock(&acer->lock);
-	if (err)
-		return -ENODEV;
-
-	return sysfs_emit(buf, "%d,%d,%d,%d,%d,%d,%d\n", output.mode,
-			  output.speed, output.brightness, output.direction,
-			  output.red, output.green, output.blue);
-}
-
-static ssize_t four_zoned_rgb_kb_store(struct device *dev,
-				       struct device_attribute *attr,
-				       const char *buf, size_t count)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	struct linuwu_sense_gaming_kb_backlight state;
-	int mode, speed, brightness, direction, red, green, blue;
-	char input_buf[30];
-	char *token;
-	char *input_ptr = input_buf;
-	ssize_t len;
-	int err;
-
-	len = strscpy(input_buf, buf, sizeof(input_buf));
-	if (len < 0)
-		return len;
-
-	if (len > 0 && input_buf[len - 1] == '\n')
-		input_buf[len - 1] = '\0';
-
-	token = strsep(&input_ptr, ",");
-	if (!token || kstrtoint(token, 10, &mode) || mode < 0 || mode > 7) {
-		pr_err("Invalid mode value.\n");
-		return -EINVAL;
-	}
-
-	token = strsep(&input_ptr, ",");
-	if (!token || kstrtoint(token, 10, &speed) || speed < 0 || speed > 9) {
-		pr_err("Invalid speed value.\n");
-		return -EINVAL;
-	}
-
-	token = strsep(&input_ptr, ",");
-	if (!token || kstrtoint(token, 10, &brightness) || brightness < 0 ||
-	    brightness > 100) {
-		pr_err("Invalid brightness value.\n");
-		return -EINVAL;
-	}
-
-	token = strsep(&input_ptr, ",");
-	if (!token || kstrtoint(token, 10, &direction) ||
-	    ((direction <= 0) && (mode == 0x3 || mode == 0x4)) ||
-	    direction < 0 || direction > 2) {
-		pr_err("Invalid direction value.\n");
-		return -EINVAL;
-	}
-
-	token = strsep(&input_ptr, ",");
-	if (!token || kstrtoint(token, 10, &red) || red < 0 || red > 255) {
-		pr_err("Invalid red value.\n");
-		return -EINVAL;
-	}
-
-	token = strsep(&input_ptr, ",");
-	if (!token || kstrtoint(token, 10, &green) || green < 0 ||
-	    green > 255) {
-		pr_err("Invalid green value.\n");
-		return -EINVAL;
-	}
-
-	token = strsep(&input_ptr, ",");
-	if (!token || kstrtoint(token, 10, &blue) || blue < 0 || blue > 255) {
-		pr_err("Invalid blue value.\n");
-		return -EINVAL;
-	}
-
-	switch (mode) {
-	case 0x0: // Static mode: Ignore speed and direction
-		speed = 0;
-		direction = 0;
-		break;
-	case 0x1: // Breathing mode: Ignore speed
-		speed = 0;
-		direction = 0;
-		break;
-	case 0x2: // Neon mode: Ignore red, green, blue, and direction
-		red = 0;
-		green = 0;
-		blue = 0;
-		direction = 0;
-		break;
-	case 0x3: // Wave mode: Ignore red, green, and blue
-		red = 0;
-		green = 0;
-		blue = 0;
-		break;
-	case 0x4: // Shifting mode: No restrictions (all values allowed)
-		break;
-	case 0x5: // Zoom mode: Ignore direction
-		direction = 0;
-		break;
-	case 0x6: // Meteor mode: Ignore direction
-		direction = 0;
-		break;
-	case 0x7: // Twinkling mode: Ignore direction
-		direction = 0;
-		break;
-	default:
-		pr_err("Invalid mode value.\n");
-		return -EINVAL;
-	}
-
-	state.mode = mode;
-	state.speed = speed;
-	state.brightness = brightness;
-	state.direction = direction;
-	state.red = red;
-	state.green = green;
-	state.blue = blue;
-
-	mutex_lock(&acer->lock);
-	err = linuwu_sense_gaming_set_kb_backlight(acer, &state);
-	if (err) {
-		mutex_unlock(&acer->lock);
-		pr_err("Error setting RGB KB status.\n");
-		return -ENODEV;
-	}
-
-	/* Set per_zone to 0 */
-	acer->current_kb_state.per_zone = 0;
-	mutex_unlock(&acer->lock);
-
-	return count;
-}
-
-/* Per Zone Mode */
-
-static int get_per_zone_color(struct acer_wmi *acer,
-			      struct per_zone_color *output)
-{
-	struct linuwu_sense_gaming_kb_backlight state;
-	u64 *zones[] = { &output->zone1, &output->zone2, &output->zone3,
-			 &output->zone4 };
-	int i, err;
-
-	for (i = 0; i < LINUWU_SENSE_GAMING_KB_ZONE_COUNT; i++) {
-		err = linuwu_sense_gaming_get_kb_zone_color(acer, i, zones[i]);
-		if (err)
-			return err;
-	}
-
-	/* Fetching Brighness Value */
-	err = linuwu_sense_gaming_get_kb_backlight(acer, &state);
-	if (err) {
-		pr_err("get kb status failed!");
-		return err;
-	}
-	output->brightness = state.brightness;
-
-	return 0;
-}
-
-static int set_per_zone_color(struct acer_wmi *acer,
-			      struct per_zone_color *input)
-{
-	struct linuwu_sense_gaming_kb_backlight state = {
-		.brightness = input->brightness,
-	};
-	u64 *zones[] = { &input->zone1, &input->zone2, &input->zone3,
-			 &input->zone4 };
-	int i, err;
-
-	err = linuwu_sense_gaming_set_kb_backlight(acer, &state);
-	if (err) {
-		pr_err("Error setting KB status.\n");
-		return err;
-	}
-
-	for (i = 0; i < LINUWU_SENSE_GAMING_KB_ZONE_COUNT; i++) {
-		err = linuwu_sense_gaming_set_kb_zone_color(acer, i, *zones[i]);
-		if (err)
-			return err;
-	}
-	/* set per_zone to 1*/
-
-	acer->current_kb_state.per_zone = 1;
-
-	return 0;
-}
-
-static ssize_t per_zoned_rgb_kb_show(struct device *dev,
-				     struct device_attribute *attr, char *buf)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	struct per_zone_color output;
-	int err;
-
-	mutex_lock(&acer->lock);
-	err = get_per_zone_color(acer, &output);
-	mutex_unlock(&acer->lock);
-	if (err)
-		return -ENODEV;
-	return sysfs_emit(buf, "%06llx,%06llx,%06llx,%06llx,%d\n", output.zone1,
-			  output.zone2, output.zone3, output.zone4,
-			  output.brightness);
-}
-
-static ssize_t per_zoned_rgb_kb_store(struct device *dev,
-				      struct device_attribute *attr,
-				      const char *buf, size_t count)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	int i = 0;
-	ssize_t len;
-	char *token;
-	char str_buf[34];
-	struct per_zone_color colors;
-	char *input_ptr = str_buf;
-	int err;
-
-	len = strscpy(str_buf, buf, sizeof(str_buf));
-	if (len < 0)
-		return len;
-
-	if (len > 0 && str_buf[len - 1] == '\n')
-		str_buf[len - 1] = '\0';
-
-	/* zone1,zone2,zone3,zone4 */
-
-	while ((token = strsep(&input_ptr, ",")) && i < 4) {
-		if (strlen(token) != 6) {
-			pr_err("Invalid rgb length: %s (%lu) (must be 3 bytes)\n",
-			       token, strlen(token));
-			return -EINVAL;
-		}
-		if (kstrtoull(token, 16, &((u64 *)&colors)[i])) {
-			pr_err("Invalid hex value: %s\n", token);
-			return -EINVAL;
-		}
-		i++;
-	}
-
-	if (!token || kstrtoint(token, 10, &colors.brightness) ||
-	    colors.brightness < 0 || colors.brightness > 100) {
-		pr_err("Invalid brightness value.\n");
-		return -EINVAL;
-	}
-
-	/* set per zone colors */
-	mutex_lock(&acer->lock);
-	err = set_per_zone_color(acer, &colors);
-	mutex_unlock(&acer->lock);
-	if (err) {
-		pr_err("Error setting RGB KB status.\n");
-		return -ENODEV;
-	}
-	return count;
-}
-
-/* BackLight State */
-
-static bool kb_state_valid(const struct kb_state *state)
-{
-	if (state->per_zone > 1)
-		return false;
-	if (state->mode > 7 || state->speed > 9)
-		return false;
-	if (state->brightness > 100 || state->direction > 2)
-		return false;
-	if (state->zones.brightness < 0 || state->zones.brightness > 100)
-		return false;
-	if (state->zones.zone1 >= BIT_ULL(24) ||
-	    state->zones.zone2 >= BIT_ULL(24) ||
-	    state->zones.zone3 >= BIT_ULL(24) ||
-	    state->zones.zone4 >= BIT_ULL(24))
-		return false;
-
-	return true;
-}
-
-static int four_zone_kb_state_update(struct acer_wmi *acer)
-{
-	struct linuwu_sense_gaming_kb_backlight out;
-	struct kb_state state = acer->current_kb_state;
-	int err;
-
-	// Get keyboard status
-	err = linuwu_sense_gaming_get_kb_backlight(acer, &out);
-	if (err) {
-		pr_err("get kb status failed!");
-		return -EIO;
-	}
-
-	state.mode = out.mode;
-	state.speed = out.speed;
-	state.brightness = out.brightness;
-	state.direction = out.direction;
-	state.red = out.red;
-	state.green = out.green;
-	state.blue = out.blue;
-
-	// Get per-zone color data
-	err = get_per_zone_color(acer, &state.zones);
-	if (err) {
-		pr_err("get_per_zone_color failed!");
-		return -EIO;
-	}
-
-	acer->current_kb_state = state;
-
-	return 0;
-}
-
-static int four_zone_kb_state_save(struct acer_wmi *acer)
-{
-	struct file *file;
-	ssize_t len;
-	int err;
-	struct kb_state state;
-
-	mutex_lock(&acer->lock);
-	err = four_zone_kb_state_update(acer);
-	if (err) {
-		mutex_unlock(&acer->lock);
-		return err;
-	}
-	state = acer->current_kb_state;
-	mutex_unlock(&acer->lock);
-
-	file = filp_open(KB_STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (IS_ERR(file)) {
-		pr_err("kb_state_access - Error opening file\n");
-		return PTR_ERR(file);
-	}
-
-	len = kernel_write(file, (char *)&state, sizeof(state), &file->f_pos);
-	if (len < 0) {
-		pr_err("kb_state_access - Error writing to file: %ld\n", len);
-	}
-
-	filp_close(file, NULL);
-
-	if (len != sizeof(state)) {
-		pr_err("Failed to write complete state to file\n");
-		return -EIO;
-	}
-
-	pr_info("kb states saved successfully\n");
-	return 0;
-}
-
-static int four_zone_kb_state_load(struct acer_wmi *acer)
-{
-	struct file *file;
-	ssize_t len;
-	int err;
-	struct kb_state state;
-
-	mutex_lock(&acer->lock);
-
-	file = filp_open(KB_STATE_FILE, O_RDONLY, 0);
-	if (!IS_ERR(file)) {
-		len = kernel_read(file, (char *)&state, sizeof(state),
-				  &file->f_pos);
-		filp_close(file, NULL);
-
-		if (len != sizeof(state)) {
-			pr_err("Incomplete state read\n");
-			err = -EIO;
-			goto out;
-		}
-
-		if (!kb_state_valid(&state)) {
-			pr_err("Invalid KB state data\n");
-			err = -EINVAL;
-			goto out;
-		}
-
-		pr_info("KB states loaded\n");
-	} else {
-		pr_info("KB state file not found!\n");
-		err = -ENOENT;
-		goto out;
-	}
-
-	if (state.per_zone) {
-		struct per_zone_color zones = state.zones;
-
-		err = set_per_zone_color(acer, &zones);
-		if (err) {
-			pr_err("Error setting RGB KB status.\n");
-			err = -EIO;
-			goto out;
-		}
-	} else {
-		struct linuwu_sense_gaming_kb_backlight kb = {
-			.mode = state.mode,
-			.speed = state.speed,
-			.brightness = state.brightness,
-			.direction = state.direction,
-			.red = state.red,
-			.green = state.green,
-			.blue = state.blue,
-		};
-
-		err = linuwu_sense_gaming_set_kb_backlight(acer, &kb);
-		if (err) {
-			pr_err("Error setting KB status.\n");
-			err = -EIO;
-			goto out;
-		}
-	}
-
-	acer->current_kb_state = state;
-
-	pr_info("KB states restored successfully\n");
-	err = 0;
-
-out:
-	mutex_unlock(&acer->lock);
-	return err;
-}
-
-/* Four Zoned Keyboard Attributes */
-static struct device_attribute four_zoned_rgb_mode = __ATTR(
-	four_zone_mode, 0644, four_zoned_rgb_kb_show, four_zoned_rgb_kb_store);
-static struct device_attribute per_zoned_rgb_mode = __ATTR(
-	per_zone_mode, 0644, per_zoned_rgb_kb_show, per_zoned_rgb_kb_store);
-static struct attribute *four_zoned_kb_attrs[] = { &four_zoned_rgb_mode.attr,
-						   &per_zoned_rgb_mode.attr,
-						   NULL };
-
-/* Four Zoned RGB Keyboard */
-static struct attribute_group four_zoned_kb_attr_group = {
-	.name = "four_zoned_kb",
-	.attrs = four_zoned_kb_attrs
-};
 /*
  * Platform device
  */
@@ -1525,12 +991,10 @@ static int acer_platform_probe(struct platform_device *pdev)
 	if (!acer)
 		return -ENODEV;
 
-	if (acer->wdevs[ACER_WMI_GUID_EVENT]) {
-		err = acer_wmi_input_setup(acer);
-		if (err) {
-			pr_err("Unable to set up input device\n");
-			return err;
-		}
+	err = linuwu_sense_input_init(acer);
+	if (err) {
+		pr_err("Unable to set up input device\n");
+		return err;
 	}
 
 	if (has_cap(acer, ACER_CAP_PLATFORM_PROFILE)) {
@@ -1567,13 +1031,9 @@ static int acer_platform_probe(struct platform_device *pdev)
 			return err;
 	}
 
-	if (acer->quirks->four_zone_kb) {
-		err = devm_device_add_group(&pdev->dev,
-					    &four_zoned_kb_attr_group);
-		if (err)
-			return err;
-		four_zone_kb_state_load(acer);
-	}
+	err = linuwu_sense_keyboard_init(acer);
+	if (err)
+		return err;
 
 	if (has_cap(acer, ACER_CAP_FAN_SPEED_READ)) {
 		err = acer_wmi_hwmon_init(acer, acer->dev);
@@ -1604,8 +1064,7 @@ static void acer_platform_remove(struct platform_device *pdev)
 	acer->ready = false;
 	mutex_unlock(&acer->event_lock);
 
-	if (acer->quirks->four_zone_kb)
-		four_zone_kb_state_save(acer);
+	linuwu_sense_keyboard_save_state(acer);
 
 	/*
 	 * All remaining resources (input, hwmon, platform profile and sysfs
@@ -1614,9 +1073,16 @@ static void acer_platform_remove(struct platform_device *pdev)
 	 */
 }
 
+/*
+ * The logical platform device and its driver are named after this driver
+ * instead of "acer-wmi": the upstream acer-wmi driver registers a platform
+ * driver of that name, and two drivers with the same name can never be
+ * registered on the platform bus at the same time. The unique name keeps this
+ * driver independent of the acer-wmi driver's load state.
+ */
 static struct platform_driver acer_platform_driver = {
 	.driver = {
-		.name = "acer-wmi",
+		.name = "linuwu-sense",
 	},
 	.probe = acer_platform_probe,
 	.remove = acer_platform_remove,
@@ -1656,11 +1122,15 @@ static struct acer_wmi *acer_wmi_instance_create(struct device *parent)
 	lockdep_assert_held(&acer_wmi_instances_lock);
 
 	/*
-	 * The state is shared by all WMI devices of this WMI bus device, so
-	 * it is owned by the WMI bus device itself. This guarantees that the
-	 * memory stays around until the last WMI device has been removed.
+	 * The state is shared by all WMI devices of this WMI bus device and
+	 * its lifetime is owned by the driver instance, not by any of those
+	 * devices: it is freed once the last WMI device of this instance has
+	 * been removed (or at module exit). The WMI core guarantees that no
+	 * notify callback can run before or after the driver's remove
+	 * callbacks, and the platform device is unregistered synchronously
+	 * before the state is freed.
 	 */
-	acer = devm_kzalloc(parent, sizeof(*acer), GFP_KERNEL);
+	acer = kzalloc_obj(struct acer_wmi);
 	if (!acer)
 		return NULL;
 
@@ -1701,11 +1171,11 @@ static int acer_wmi_count_matching_wdevs(struct device *dev, void *data)
 }
 
 /*
- * Remove a per WMI bus device driver state from the registry and tear down
- * the platform-facing interfaces. The memory itself is owned by the WMI bus
- * device and released by devres, so it must not be freed here.
+ * Remove the platform-facing interfaces of an instance while keeping the
+ * shared state allocated: the WMI devices of the instance still reference it
+ * through wdev_data->acer.
  */
-static void acer_wmi_instance_teardown(struct acer_wmi *acer)
+static void acer_wmi_instance_deactivate(struct acer_wmi *acer)
 {
 	lockdep_assert_held(&acer_wmi_instances_lock);
 
@@ -1714,8 +1184,23 @@ static void acer_wmi_instance_teardown(struct acer_wmi *acer)
 		acer->pdev = NULL;
 		acer->dev = NULL;
 	}
+}
 
+/*
+ * Free an instance which has no bound WMI device left. The WMI core
+ * guarantees that notify callbacks are synchronized with the driver's remove
+ * callbacks, and platform_device_unregister() drains the sysfs and subsystem
+ * resources synchronously, so no reference can be left behind here.
+ */
+static void acer_wmi_instance_free(struct acer_wmi *acer)
+{
+	lockdep_assert_held(&acer_wmi_instances_lock);
+
+	acer_wmi_instance_deactivate(acer);
 	list_del_init(&acer->node);
+	mutex_destroy(&acer->lock);
+	mutex_destroy(&acer->event_lock);
+	kfree(acer);
 }
 
 static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
@@ -1814,8 +1299,8 @@ static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
 
 out_maybe_destroy:
 	/* Drop an instance which never got any WMI device */
-	if (!acer->wdev_count && !acer->pdev)
-		acer_wmi_instance_teardown(acer);
+	if (!acer->wdev_count)
+		acer_wmi_instance_free(acer);
 out_unlock:
 	mutex_unlock(&acer_wmi_instances_lock);
 	return err;
@@ -1857,16 +1342,16 @@ static void acer_wmi_wdev_remove(struct wmi_device *wdev)
 	if (acer->wdev_count)
 		acer->wdev_count--;
 
-	/* Tear down the instance once its last WMI device is gone. */
+	/* Free the instance once its last WMI device is gone. */
 	if (!acer->wdev_count)
-		acer_wmi_instance_teardown(acer);
+		acer_wmi_instance_free(acer);
 
 	mutex_unlock(&acer_wmi_instances_lock);
 }
 
 static struct wmi_driver acer_wmi_driver = {
 	.driver = {
-		.name = "acer-wmi",
+		.name = "linuwu-sense",
 	},
 	.id_table = acer_wmi_id_table,
 	/*
@@ -1915,7 +1400,10 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 		pr_info("No WMID EC raw mode enable method\n");
 	}
 
-	/* Keep the well-known platform device name for the only instance */
+	/*
+	 * Keep a stable device name for the logical device of the only
+	 * instance; additional instances get an auto-assigned id.
+	 */
 	list_for_each_entry(other, &acer_wmi_instances, node) {
 		if (other != acer && other->pdev) {
 			id = PLATFORM_DEVID_AUTO;
@@ -1923,7 +1411,7 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 		}
 	}
 
-	acer->pdev = platform_device_alloc("acer-wmi", id);
+	acer->pdev = platform_device_alloc("linuwu-sense", id);
 	if (!acer->pdev)
 		return -ENOMEM;
 
@@ -1951,9 +1439,11 @@ static void acer_wmi_teardown(void)
 	/*
 	 * Unregister the platform devices while all WMI devices are still
 	 * bound, so that the state is saved before the WMI devices are gone.
+	 * The instances themselves stay allocated until the WMI devices have
+	 * been removed by wmi_driver_unregister() below.
 	 */
 	list_for_each_entry_safe(acer, tmp, &acer_wmi_instances, node)
-		acer_wmi_instance_teardown(acer);
+		acer_wmi_instance_deactivate(acer);
 	mutex_unlock(&acer_wmi_instances_lock);
 
 	platform_driver_unregister(&acer_platform_driver);
@@ -1961,12 +1451,11 @@ static void acer_wmi_teardown(void)
 
 	/*
 	 * Drop any leftover registry entry, e.g. for an instance whose WMI
-	 * devices never bound to the driver. The memory is released by devres
-	 * once the WMI bus device is gone.
+	 * devices never bound to the driver.
 	 */
 	mutex_lock(&acer_wmi_instances_lock);
 	list_for_each_entry_safe(acer, tmp, &acer_wmi_instances, node)
-		acer_wmi_instance_teardown(acer);
+		acer_wmi_instance_free(acer);
 	mutex_unlock(&acer_wmi_instances_lock);
 }
 

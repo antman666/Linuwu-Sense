@@ -18,14 +18,29 @@ Next, clone the repository and build the module:
 ```bash
 git clone https://github.com/0x7375646F/Linuwu-Sense.git
 cd Linuwu-Sense
-make install
+make
 ```
-`make install` removes the running `acer_wmi` module, blacklists it, installs `linuwu_sense.ko` and loads it. `acer_wmi` and this driver talk to the same WMI devices on these machines, so `acer_wmi` must stay unloaded while `linuwu_sense` is in use (the kernel does not enforce this automatically).
-
-To Uninstall:
+If your kernel was built with clang, select the matching toolchain (`make LLVM=1`). Install the module with the kernel's standard external module target and load it:
 ```bash
-make uninstall
+sudo make modules_install
+sudo modprobe linuwu_sense
 ```
+The module advertises the WMI GUIDs it supports through `MODULE_DEVICE_TABLE(wmi)`, so udev also loads it from the WMI device modalias on the next boot. No `/etc/modules-load.d` entry is needed. DKMS builds and installs the module with the same kbuild interface (a `dkms.conf` is not shipped in this repository).
+
+### Driver ownership and module loading
+
+Linuwu-Sense binds the Acer WMI devices it needs through the Linux WMI bus and the driver core. The kernel decides device ownership: a WMI device is bound to at most one driver, and this driver never unloads, blacklists or replaces another driver. The upstream `acer_wmi` module uses the legacy ACPI-WMI interface and does not register a WMI device driver, so it does not take the WMI devices away from Linuwu-Sense. It still talks to the same firmware through its own interface, so running both drivers at the same time is not supported. If `acer_wmi` is active on your system and you do not want that, change your own module configuration; this project does not modify your system's module policy.
+
+To uninstall:
+```bash
+sudo rmmod linuwu_sense
+sudo rm -f /lib/modules/$(uname -r)/updates/linuwu_sense.ko*
+sudo depmod -a
+```
+(The installed module may be compressed, for example `linuwu_sense.ko.zst`. When DKMS or another module manager owns the installation, remove the module with that manager instead.)
+
+The sysfs controls are owned by root and writable by root only by default. If you want to give a group write access (for example for a GUI frontend), configure that yourself with a systemd-tmpfiles or udev rule for the paths below.
+
 > **⚠️ Warning!**
 > ## Use at your own risk! This driver is independently developed through reverse engineering the official PredatorSense app, without any involvement from Acer. It interacts with low-level WMI methods, which may not be tested across all models.
 
@@ -45,9 +60,9 @@ Thermal profiles can be switched through `/sys/firmware/acpi/platform_profile`. 
 
 ---
 
-For **Predator** laptops, the following path is used: `/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense`
+For **Predator** laptops, the following path is used: `/sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense`
 
-For **Nitro** laptops, the following path is used: `/sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/nitro_sense`
+For **Nitro** laptops, the following path is used: `/sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/nitro_sense`
 
 predator_sense – The Predator controls provided by this driver: LCD override, fan speed, turbo mode, battery limiter, battery calibration, USB charging, backlight timeout and boot animation sound. Only the controls supported by the model are shown.
 
@@ -83,11 +98,11 @@ This feature turns off the keyboard RGB after 30 seconds of idle mode.
 
 To check the current status, use:
 
-`cat /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/backlight_timeout`
+`cat /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/backlight_timeout`
 
 To change the state, use:
 
-`echo 1 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/backlight_timeout`
+`echo 1 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/backlight_timeout`
 
 ---
 
@@ -100,11 +115,11 @@ This function calibrates your battery to provide a more accurate percentage read
 
 To check the current status:
 
-`cat /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/battery_calibration`
+`cat /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/battery_calibration`
 
 To change the state:
 
-`echo 1 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/battery_calibration`
+`echo 1 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/battery_calibration`
 
 ---
 
@@ -117,11 +132,11 @@ Limits battery charging to 80%, preserving battery health for laptops primarily 
 
 To check the current status:
 
-`cat /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/battery_limiter`
+`cat /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/battery_limiter`
 
 To change the state:
 
-`echo 1 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/battery_limiter`
+`echo 1 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/battery_limiter`
 
 ---
 
@@ -134,11 +149,11 @@ Enables or disables custom boot animation and sound.
 
 To check the current status:
 
-`cat /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/boot_animation_sound`
+`cat /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/boot_animation_sound`
 
 To change the state:
 
-`echo 0 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/boot_animation_sound`
+`echo 0 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/boot_animation_sound`
 
 ---
 
@@ -153,7 +168,7 @@ Controls the CPU and GPU fan speeds.
 
 Example (set CPU to 50 and GPU to 70):
 
-`echo 50,70 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/fan_speed`
+`echo 50,70 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/fan_speed`
 
 ---
 
@@ -166,11 +181,11 @@ Reduces LCD latency and minimizes ghosting.
 
 To check the current status:
 
-`cat /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/lcd_override`
+`cat /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/lcd_override`
 
 To change the state:
 
-`echo 1 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/lcd_override`
+`echo 1 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/lcd_override`
 
 ---
 
@@ -185,11 +200,11 @@ Allows the USB charging port to provide power even when the laptop is off.
 
 To check the current status:
 
-`cat /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/usb_charging`
+`cat /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/usb_charging`
 
 To change the state:
 
-`echo 20 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/predator_sense/usb_charging`
+`echo 20 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/usb_charging`
 
 ---
 ## 💻 Keyboard Configuration 
@@ -213,11 +228,11 @@ This mode allows you to set a specific RGB color for each of the four keyboard z
 
 To set all four zones to the same color (`4287f5`) and brightness to full:
 
-`echo 4287f5,4287f5,4287f5,4287f5,100 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/four_zoned_kb/per_zone_mode`
+`echo 4287f5,4287f5,4287f5,4287f5,100 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/four_zoned_kb/per_zone_mode`
 
 To set each zone with unique colors:
 
-`echo 4287f5,ff5733,33ff57,ff33a6,100 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/four_zoned_kb/per_zone_mode`
+`echo 4287f5,ff5733,33ff57,ff33a6,100 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/four_zoned_kb/per_zone_mode`
 
 When reading (`cat`) the `per_zone_mode` file, the current color values for each zone are displayed in the format:
 
@@ -250,7 +265,7 @@ The `four_zone_mode` controls advanced RGB effects for your keyboard, requiring 
     
     Set to **Neon Mode** with speed 1, full brightness, and top-to-bottom direction:
     
-    `echo 3,1,100,2,0,0,0 | sudo tee /sys/module/linuwu_sense/drivers/platform:acer-wmi/acer-wmi/four_zoned_kb/four_zone_mode`
+    `echo 3,1,100,2,0,0,0 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/four_zoned_kb/four_zone_mode`
     
     **Explanation:**
     
@@ -262,7 +277,7 @@ The `four_zone_mode` controls advanced RGB effects for your keyboard, requiring 
     - `0`: Green (black for Neon)
     - `0`: Blue (black for Neon)
  
-The four-zone keyboard state is saved when the module is unloaded and restored on the next load (it is stored in `/etc/four_zone_kb_state`). The provided `linuwu_sense.service` unloads the module at shutdown, so the keyboard state survives a reboot.
+The four-zone keyboard state is saved when the module is unloaded and restored on the next load (it is stored in `/etc/four_zone_kb_state`). The provided `linuwu_sense.service` unloads the module at shutdown, so the keyboard state survives a reboot. It is a userspace systemd unit and is not installed or enabled by the build system; install it yourself (copy it to `/etc/systemd/system/` and enable it) if you want this behavior.
 
 ## GUI (third-party)
 The following projects are separate third-party frontends that talk to this module:

@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-2.0
+/*
+ *  hwmon frontend for the Acer Predator/Nitro WMI driver.
+ *
+ *  This module maps the hwmon channels to the sensor readings provided by the
+ *  Predator Gaming WMI backend. The backend owns the firmware command layout,
+ *  the frontend only obeys the hwmon unit conventions.
+ */
 
-#include <linux/bitfield.h>
 #include <linux/device.h>
 #include <linux/hwmon.h>
 #include <linux/kernel.h>
@@ -10,58 +16,42 @@
 #include "linuwu_sense_gaming.h"
 #include "linuwu_sense_hwmon.h"
 
-#define ACER_WMID_CMD_GET_PREDATOR_V4_SUPPORTED_SENSORS 0x0000
-#define ACER_WMID_CMD_GET_PREDATOR_V4_SENSOR_READING 0x0001
-
-#define ACER_PREDATOR_V4_SENSOR_INDEX_BIT_MASK GENMASK_ULL(15, 8)
-#define ACER_PREDATOR_V4_SENSOR_READING_BIT_MASK GENMASK_ULL(23, 8)
-#define ACER_PREDATOR_V4_SUPPORTED_SENSORS_BIT_MASK GENMASK_ULL(39, 24)
-
-enum acer_wmi_predator_v4_sensor_id {
-	ACER_WMID_SENSOR_CPU_TEMPERATURE = 0x01,
-	ACER_WMID_SENSOR_CPU_FAN_SPEED = 0x02,
-	ACER_WMID_SENSOR_EXTERNAL_TEMPERATURE_2 = 0x03,
-	ACER_WMID_SENSOR_GPU_FAN_SPEED = 0x06,
-	ACER_WMID_SENSOR_GPU_TEMPERATURE = 0x0A,
-};
-
 struct acer_wmi_hwmon_data {
 	struct acer_wmi *acer;
 	u64 supported_sensors;
 };
 
-static const enum acer_wmi_predator_v4_sensor_id
-	acer_wmi_temp_channel_to_sensor_id[] = {
-		[0] = ACER_WMID_SENSOR_CPU_TEMPERATURE,
-		[1] = ACER_WMID_SENSOR_GPU_TEMPERATURE,
-		[2] = ACER_WMID_SENSOR_EXTERNAL_TEMPERATURE_2,
-	};
+static const enum linuwu_sense_gaming_sensor acer_wmi_temp_channel_to_sensor[] = {
+	[0] = LINUWU_SENSE_GAMING_SENSOR_CPU_TEMPERATURE,
+	[1] = LINUWU_SENSE_GAMING_SENSOR_GPU_TEMPERATURE,
+	[2] = LINUWU_SENSE_GAMING_SENSOR_EXTERNAL_TEMPERATURE_2,
+};
 
-static const enum acer_wmi_predator_v4_sensor_id
-	acer_wmi_fan_channel_to_sensor_id[] = {
-		[0] = ACER_WMID_SENSOR_CPU_FAN_SPEED,
-		[1] = ACER_WMID_SENSOR_GPU_FAN_SPEED,
-	};
+static const enum linuwu_sense_gaming_sensor acer_wmi_fan_channel_to_sensor[] = {
+	[0] = LINUWU_SENSE_GAMING_SENSOR_CPU_FAN_SPEED,
+	[1] = LINUWU_SENSE_GAMING_SENSOR_GPU_FAN_SPEED,
+};
 
 static umode_t acer_wmi_hwmon_is_visible(const void *data,
 					 enum hwmon_sensor_types type, u32 attr,
 					 int channel)
 {
 	const struct acer_wmi_hwmon_data *hwmon = data;
-	enum acer_wmi_predator_v4_sensor_id sensor_id;
+	enum linuwu_sense_gaming_sensor sensor;
 
 	switch (type) {
 	case hwmon_temp:
-		sensor_id = acer_wmi_temp_channel_to_sensor_id[channel];
+		sensor = acer_wmi_temp_channel_to_sensor[channel];
 		break;
 	case hwmon_fan:
-		sensor_id = acer_wmi_fan_channel_to_sensor_id[channel];
+		sensor = acer_wmi_fan_channel_to_sensor[channel];
 		break;
 	default:
 		return 0;
 	}
 
-	if (hwmon->supported_sensors & BIT(sensor_id - 1))
+	if (linuwu_sense_gaming_sensor_is_supported(hwmon->supported_sensors,
+						    sensor))
 		return 0444;
 
 	return 0;
@@ -71,8 +61,8 @@ static int acer_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 			       u32 attr, int channel, long *val)
 {
 	struct acer_wmi_hwmon_data *hwmon = dev_get_drvdata(dev);
-	u64 command = ACER_WMID_CMD_GET_PREDATOR_V4_SENSOR_READING;
-	u64 result;
+	enum linuwu_sense_gaming_sensor sensor;
+	long value;
 	int ret;
 
 	if (!hwmon || !hwmon->acer)
@@ -80,29 +70,22 @@ static int acer_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 
 	switch (type) {
 	case hwmon_temp:
-		command |=
-			FIELD_PREP(ACER_PREDATOR_V4_SENSOR_INDEX_BIT_MASK,
-				   acer_wmi_temp_channel_to_sensor_id[channel]);
-		ret = linuwu_sense_gaming_get_sys_info(hwmon->acer, command,
-						       &result);
+		sensor = acer_wmi_temp_channel_to_sensor[channel];
+		ret = linuwu_sense_gaming_read_sensor(hwmon->acer, sensor,
+						      &value);
 		if (ret < 0)
 			return ret;
 
-		result = FIELD_GET(ACER_PREDATOR_V4_SENSOR_READING_BIT_MASK,
-				   result);
-		*val = result * MILLIDEGREE_PER_DEGREE;
+		*val = value * MILLIDEGREE_PER_DEGREE;
 		return 0;
 	case hwmon_fan:
-		command |=
-			FIELD_PREP(ACER_PREDATOR_V4_SENSOR_INDEX_BIT_MASK,
-				   acer_wmi_fan_channel_to_sensor_id[channel]);
-
-		ret = linuwu_sense_gaming_get_sys_info(hwmon->acer, command,
-						       &result);
+		sensor = acer_wmi_fan_channel_to_sensor[channel];
+		ret = linuwu_sense_gaming_read_sensor(hwmon->acer, sensor,
+						      &value);
 		if (ret < 0)
 			return ret;
-		*val = FIELD_GET(ACER_PREDATOR_V4_SENSOR_READING_BIT_MASK,
-				 result);
+
+		*val = value;
 		return 0;
 	default:
 		return -EOPNOTSUPP;
@@ -128,7 +111,6 @@ int acer_wmi_hwmon_init(struct acer_wmi *acer, struct device *dev)
 {
 	struct acer_wmi_hwmon_data *hwmon_data;
 	struct device *hwmon;
-	u64 result;
 	int ret;
 
 	hwmon_data = devm_kzalloc(dev, sizeof(*hwmon_data), GFP_KERNEL);
@@ -137,14 +119,12 @@ int acer_wmi_hwmon_init(struct acer_wmi *acer, struct device *dev)
 
 	hwmon_data->acer = acer;
 
-	ret = linuwu_sense_gaming_get_sys_info(
-		acer, ACER_WMID_CMD_GET_PREDATOR_V4_SUPPORTED_SENSORS, &result);
+	ret = linuwu_sense_gaming_get_supported_sensors(
+		acer, &hwmon_data->supported_sensors);
 	if (ret < 0)
 		return ret;
 
 	/* Return early if no sensors are available. */
-	hwmon_data->supported_sensors =
-		FIELD_GET(ACER_PREDATOR_V4_SUPPORTED_SENSORS_BIT_MASK, result);
 	if (!hwmon_data->supported_sensors)
 		return 0;
 

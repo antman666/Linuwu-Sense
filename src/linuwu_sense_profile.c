@@ -3,7 +3,9 @@
  *  platform_profile adapter for the Acer WMI Laptop Extras driver.
  *
  *  This module maps the Linux platform_profile choices to the Predator
- *  thermal profile commands provided by the gaming backend.
+ *  thermal profile commands provided by the gaming backend. It is the only
+ *  owner of the selected platform profile and of the power source state it
+ *  is derived from.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -13,6 +15,7 @@
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/platform_profile.h>
+#include <linux/slab.h>
 #include <linux/types.h>
 
 #include "linuwu_sense.h"
@@ -20,8 +23,22 @@
 #include "linuwu_sense_profile.h"
 #include "linuwu_sense_quirks.h"
 
+/* Driver state private to the platform_profile frontend */
+struct linuwu_sense_profile {
+	struct device *dev;
+	bool supported;
+	bool on_ac;
+	u8 thermal_profile;
+};
+
+static struct linuwu_sense_profile *acer_profile(struct acer_wmi *acer)
+{
+	return acer->profile;
+}
+
 static int acer_power_source_refresh_locked(struct acer_wmi *acer)
 {
+	struct linuwu_sense_profile *profile = acer_profile(acer);
 	bool on_ac;
 	int err;
 
@@ -29,7 +46,7 @@ static int acer_power_source_refresh_locked(struct acer_wmi *acer)
 	if (err)
 		return err;
 
-	acer->on_ac = on_ac;
+	profile->on_ac = on_ac;
 	return 0;
 }
 
@@ -132,13 +149,14 @@ static u8 acer_normalize_platform_profile(bool on_ac,
 
 static int acer_apply_thermal_profile_locked(struct acer_wmi *acer, u8 profile)
 {
+	struct linuwu_sense_profile *state = acer_profile(acer);
 	int err;
 
 	err = linuwu_sense_gaming_set_thermal_profile(acer, profile);
 	if (err)
 		return err;
 
-	acer->thermal_profile = profile;
+	state->thermal_profile = profile;
 
 	return 0;
 }
@@ -148,6 +166,7 @@ acer_predator_v4_platform_profile_get(struct device *dev,
 				      enum platform_profile_option *profile)
 {
 	struct acer_wmi *acer = dev_get_drvdata(dev);
+	struct linuwu_sense_profile *state = acer_profile(acer);
 	u8 tp;
 	int err;
 
@@ -176,7 +195,7 @@ acer_predator_v4_platform_profile_get(struct device *dev,
 		}
 	}
 	if (!err)
-		acer->thermal_profile = tp;
+		state->thermal_profile = tp;
 	mutex_unlock(&acer->lock);
 
 	return err;
@@ -187,6 +206,7 @@ acer_predator_v4_platform_profile_set(struct device *dev,
 				      enum platform_profile_option profile)
 {
 	struct acer_wmi *acer = dev_get_drvdata(dev);
+	struct linuwu_sense_profile *state = acer_profile(acer);
 	bool old_on_ac;
 	u8 tp;
 	int err;
@@ -199,17 +219,18 @@ acer_predator_v4_platform_profile_set(struct device *dev,
 		goto out;
 	}
 
-	old_on_ac = acer->on_ac;
+	old_on_ac = state->on_ac;
 	err = acer_power_source_refresh_locked(acer);
 	if (err)
 		goto out;
 
-	if (old_on_ac != acer->on_ac)
-		acer->thermal_profile =
+	if (old_on_ac != state->on_ac)
+		state->thermal_profile =
 			acer_thermal_profile_for_power_transition(
-				old_on_ac, acer->on_ac, acer->thermal_profile);
+				old_on_ac, state->on_ac,
+				state->thermal_profile);
 
-	tp = acer_normalize_platform_profile(acer->on_ac, profile);
+	tp = acer_normalize_platform_profile(state->on_ac, profile);
 	err = acer_apply_thermal_profile_locked(acer, tp);
 
 out:
@@ -248,13 +269,14 @@ static int acer_predator_v4_platform_profile_probe(void *drvdata,
 
 static int acer_thermal_profile_init(struct acer_wmi *acer)
 {
+	struct linuwu_sense_profile *state = acer_profile(acer);
 	u8 profile;
 	int err;
 
 	mutex_lock(&acer->lock);
 	err = acer_power_source_refresh_locked(acer);
 	if (!err) {
-		profile = acer_default_thermal_profile(acer->on_ac);
+		profile = acer_default_thermal_profile(state->on_ac);
 		err = acer_apply_thermal_profile_locked(acer, profile);
 	}
 	mutex_unlock(&acer->lock);
@@ -270,6 +292,7 @@ static const struct platform_profile_ops acer_predator_v4_platform_profile_ops =
 
 static int acer_platform_profile_setup(struct acer_wmi *acer)
 {
+	struct linuwu_sense_profile *state = acer_profile(acer);
 	const int max_retries = 10;
 	int delay_ms = 100;
 
@@ -284,8 +307,8 @@ static int acer_platform_profile_setup(struct acer_wmi *acer)
 			acer->dev, "acer-wmi", acer,
 			&acer_predator_v4_platform_profile_ops);
 		if (!IS_ERR(profile_dev)) {
-			acer->platform_profile_dev = profile_dev;
-			acer->platform_profile_support = true;
+			state->dev = profile_dev;
+			state->supported = true;
 			pr_info("Platform profile registered successfully "
 				"(attempt %d)\n",
 				attempt);
@@ -301,24 +324,33 @@ static int acer_platform_profile_setup(struct acer_wmi *acer)
 	}
 	pr_warn("Platform profile setup failed. Continuing to load without "
 		"profile support.\n");
-	acer->platform_profile_dev = NULL;
-	acer->platform_profile_support = false;
+	state->dev = NULL;
+	state->supported = false;
 
 	return 0;
 }
 
 int linuwu_sense_profile_init(struct acer_wmi *acer)
 {
+	struct linuwu_sense_profile *state;
 	int err;
 
 	if (!acer->quirks->predator_v4 && !acer->quirks->nitro_sense &&
 	    !acer->quirks->nitro_v4)
 		return 0;
 
+	state = devm_kzalloc(acer->dev, sizeof(*state), GFP_KERNEL);
+	if (!state)
+		return -ENOMEM;
+
+	acer->profile = state;
+
 	if (acer->quirks->predator_v4) {
 		err = acer_thermal_profile_init(acer);
-		if (err)
+		if (err) {
+			acer->profile = NULL;
 			return err;
+		}
 	}
 
 	acer_platform_profile_setup(acer);
@@ -328,53 +360,59 @@ int linuwu_sense_profile_init(struct acer_wmi *acer)
 
 int linuwu_sense_profile_cycle(struct acer_wmi *acer)
 {
+	struct linuwu_sense_profile *state = acer_profile(acer);
 	bool old_on_ac;
 	u8 next;
 	int err;
 
-	if (!acer->quirks->predator_v4)
+	if (!state || !acer->quirks->predator_v4)
 		return 0;
 
 	mutex_lock(&acer->lock);
-	old_on_ac = acer->on_ac;
+	old_on_ac = state->on_ac;
 	err = acer_power_source_refresh_locked(acer);
 	if (err)
 		goto out;
 
-	if (old_on_ac != acer->on_ac)
-		acer->thermal_profile =
+	if (old_on_ac != state->on_ac)
+		state->thermal_profile =
 			acer_thermal_profile_for_power_transition(
-				old_on_ac, acer->on_ac, acer->thermal_profile);
+				old_on_ac, state->on_ac,
+				state->thermal_profile);
 
-	next = acer_next_thermal_profile(acer->on_ac, acer->thermal_profile);
+	next = acer_next_thermal_profile(state->on_ac, state->thermal_profile);
 	err = acer_apply_thermal_profile_locked(acer, next);
 out:
 	mutex_unlock(&acer->lock);
 
-	if (!err && acer->platform_profile_support)
-		platform_profile_notify(acer->platform_profile_dev);
+	if (!err && state->supported)
+		platform_profile_notify(state->dev);
 
 	return err;
 }
 
 int linuwu_sense_profile_power_source_changed(struct acer_wmi *acer, bool on_ac)
 {
+	struct linuwu_sense_profile *state = acer_profile(acer);
 	bool old_on_ac;
 	u8 target;
 	int err = 0;
 
+	if (!state)
+		return 0;
+
 	mutex_lock(&acer->lock);
-	old_on_ac = acer->on_ac;
+	old_on_ac = state->on_ac;
 	if (old_on_ac != on_ac) {
 		target = acer_thermal_profile_for_power_transition(
-			old_on_ac, on_ac, acer->thermal_profile);
-		acer->on_ac = on_ac;
+			old_on_ac, on_ac, state->thermal_profile);
+		state->on_ac = on_ac;
 		err = acer_apply_thermal_profile_locked(acer, target);
 	}
 	mutex_unlock(&acer->lock);
 
-	if (!err && old_on_ac != on_ac && acer->platform_profile_support)
-		platform_profile_notify(acer->platform_profile_dev);
+	if (!err && old_on_ac != on_ac && state->supported)
+		platform_profile_notify(state->dev);
 
 	return err;
 }

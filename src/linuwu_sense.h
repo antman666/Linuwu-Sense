@@ -17,7 +17,9 @@
 #include <linux/types.h>
 
 struct device;
-struct input_dev;
+struct linuwu_sense_input;
+struct linuwu_sense_keyboard;
+struct linuwu_sense_profile;
 struct linuwu_sense_quirks;
 struct platform_device;
 struct wmi_device;
@@ -46,29 +48,18 @@ enum acer_wmi_guid {
 	ACER_WMI_GUID_COUNT,
 };
 
-struct per_zone_color {
-	u64 zone1, zone2, zone3, zone4;
-	int brightness;
-} __packed;
-
-struct kb_state {
-	u8 per_zone;
-	u8 mode;
-	u8 speed;
-	u8 brightness;
-	u8 direction;
-	u8 red;
-	u8 green;
-	u8 blue;
-	struct per_zone_color zones;
-} __packed;
-
 /*
  * Per physical device driver state. This structure is shared by all WMI
- * devices belonging to the same WMI bus device. It is allocated by devres on
- * the WMI bus device, so the memory outlives every WMI device and is released
- * only when the WMI bus device itself goes away. The platform device keeps a
- * pointer to it via platform_set_drvdata().
+ * devices belonging to the same WMI bus device. It is allocated by the first
+ * WMI device probe of an instance and freed once the last WMI device of that
+ * instance has been removed, or at module exit. It therefore outlives every
+ * individual WMI device of the instance.
+ *
+ * The driver also owns one logical platform device per instance
+ * ("linuwu-sense"), which hosts the userspace control surface and the
+ * devres-managed subsystem devices (input, hwmon, platform profile). The
+ * platform device keeps a pointer to this structure via
+ * platform_set_drvdata().
  */
 struct acer_wmi {
 	struct device *dev; /* the platform device */
@@ -78,6 +69,15 @@ struct acer_wmi {
 	struct list_head wdev_list;
 
 	struct wmi_device *wdevs[ACER_WMI_GUID_COUNT];
+
+	/*
+	 * Opaque state owned by the Linux subsystem frontends. The core
+	 * driver only stores the pointers, the component that allocated the
+	 * state is responsible for its content.
+	 */
+	struct linuwu_sense_input *input;
+	struct linuwu_sense_keyboard *keyboard;
+	struct linuwu_sense_profile *profile;
 
 	/*
 	 * Number of WMI devices of this instance that are currently bound to
@@ -96,9 +96,10 @@ struct acer_wmi {
 	const struct linuwu_sense_quirks *quirks;
 
 	/*
-	 * Protects the cached fan speed pair, keyboard state, power-source
-	 * state and thermal profile shared by the sysfs and WMI event paths.
-	 * May be held across ACPI/WMI operations, so it must stay a mutex.
+	 * Protects the cached fan speed pair and serializes the WMI
+	 * operations issued by the control surface, the WMI event path and
+	 * the subsystem frontends. May be held across ACPI/WMI operations,
+	 * so it must stay a mutex.
 	 */
 	struct mutex lock;
 
@@ -110,17 +111,8 @@ struct acer_wmi {
 	struct mutex event_lock;
 	bool ready;
 
-	struct input_dev *input_dev;
-
-	struct device *platform_profile_dev;
-	bool platform_profile_support;
-
-	bool on_ac;
-	u8 thermal_profile;
-
 	int cpu_fan_speed;
 	int gpu_fan_speed;
-	struct kb_state current_kb_state;
 };
 
 #endif /* _LINUWU_SENSE_H_ */
