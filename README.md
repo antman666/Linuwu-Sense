@@ -208,41 +208,43 @@ To change the state:
 
 ---
 ## 💻 Keyboard Configuration 
-### **Directory: `four_zoned_kb`**
 
-The `four_zoned_kb` directory contains two Virtual File Systems (VFS) that control the RGB backlight behavior of the four-zone keyboard:
+The four-zone keyboard backlight is exposed through the Linux LED subsystem:
+one multicolor LED class device per zone under `/sys/class/leds/`. The device
+names follow the zoned keyboard backlight naming scheme from
+`Documentation/leds/leds-class.rst`:
 
-1. **`four_zone_mode`**
-2. **`per_zone_mode`**
+```
+linuwu-sense:rgb:kbd_zoned_backlight-zone1
+linuwu-sense:rgb:kbd_zoned_backlight-zone2
+linuwu-sense:rgb:kbd_zoned_backlight-zone3
+linuwu-sense:rgb:kbd_zoned_backlight-zone4
+```
 
-#### **1. Per-Zone Mode (`per_zone_mode`) 🎨**
+The zones are named positionally, in the order of the firmware zone
+selectors. Each zone LED provides the standard multicolor attributes:
 
-This mode allows you to set a specific RGB color for each of the four keyboard zones individually. Each zone is represented by an RGB value in hexadecimal format (e.g., `4287f5` where `42` is Red, `87` is Green, and `f5` is Blue).
+- `multi_intensity` (write `R G B` with values 0-255) sets the zone color.
+- `multi_index` reads back the color order, which is `red green blue`.
+- `brightness` (0-255) dims the zone. The firmware only has one brightness for
+  all zones, so the driver maps the per-zone LED brightness onto the color
+  intensity in software.
+- `max_brightness` is 255.
 
-- **Parameters:**
-    
-    - The `per_zone_mode` file accepts four parameters, one for each zone, separated by commas.
-    - The `per_zone_mode` also accepts brightness value.
-    - Each parameter represents the RGB value for a specific zone in the format `RRGGBB`.
-- **Example:**
+Example, set the first zone to `4287f5` at full brightness:
 
-To set all four zones to the same color (`4287f5`) and brightness to full:
+`echo 66 135 245 | sudo tee /sys/class/leds/linuwu-sense:rgb:kbd_zoned_backlight-zone1/multi_intensity`
 
-`echo 4287f5,4287f5,4287f5,4287f5,100 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/four_zoned_kb/per_zone_mode`
+Writing a zone color switches the keyboard into the per-zone static mode.
 
-To set each zone with unique colors:
+### **Acer effect mode (`four_zone_mode`) ✨**
 
-`echo 4287f5,ff5733,33ff57,ff33a6,100 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/four_zoned_kb/per_zone_mode`
+The `four_zone_mode` vendor attribute under
 
-When reading (`cat`) the `per_zone_mode` file, the current color values for each zone are displayed in the format:
+`/sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/four_zoned_kb/four_zone_mode`
 
-`4287f5,4287f5,4287f5,4287f5,100`
-
-This indicates the current RGB color for each of the four zones.
-
-### **Four-Zone Mode (`four_zone_mode`) ✨**
-
-The `four_zone_mode` controls advanced RGB effects for your keyboard, requiring seven parameters:
+keeps the Acer specific lighting effects which the LED subsystem cannot
+express. The format is unchanged and takes seven parameters:
 
 - **Parameters:**
     

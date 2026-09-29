@@ -3,10 +3,11 @@
  *  Four zone keyboard backlight for the Acer Predator/Nitro driver.
  *
  *  This module implements the keyboard backlight commands of the Predator
- *  Gaming WMI interface, the four zone RGB sysfs interface and the
- *  persistence of the backlight state across module loads. The core driver
- *  only calls the init and save entry points, the state itself is private to
- *  this module.
+ *  Gaming WMI interface, one multicolor LED class device per keyboard zone
+ *  and the persistence of the backlight state across module loads. The Acer
+ *  specific effect settings which the LED subsystem cannot express stay
+ *  available through a vendor sysfs attribute. The core driver only calls the
+ *  init and save entry points, the state itself is private to this module.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
@@ -15,6 +16,8 @@
 #include <linux/device.h>
 #include <linux/fs.h>
 #include <linux/kernel.h>
+#include <linux/led-class-multicolor.h>
+#include <linux/math.h>
 #include <linux/minmax.h>
 #include <linux/string.h>
 #include <linux/sysfs.h>
@@ -83,9 +86,35 @@ struct kb_state {
 	struct per_zone_color zones;
 } __packed;
 
-/* Driver state private to the keyboard backlight */
+/*
+ * Driver state private to the keyboard backlight.
+ *
+ * One multicolor LED class device per keyboard zone. The firmware has a
+ * single global brightness for all zones, but the LED class models one
+ * brightness per LED class device, so the driver maps the LED brightness in
+ * software onto the per zone color intensity and keeps the firmware
+ * brightness at its maximum while per zone colors are active.
+ */
+struct linuwu_sense_keyboard_led {
+	struct led_classdev_mc mc;
+	struct mc_subled subled[3];
+	struct linuwu_sense_keyboard *kb;
+	enum linuwu_sense_keyboard_zone zone;
+};
+
 struct linuwu_sense_keyboard {
+	struct acer_wmi *acer;
 	struct kb_state state;
+	struct linuwu_sense_keyboard_led leds[LINUWU_SENSE_KEYBOARD_ZONE_COUNT];
+};
+
+/*
+ * LED class device names of the four zones, following the zoned keyboard
+ * backlight naming from Documentation/leds/leds-class.rst. The zone names are
+ * positional, in the order of the firmware zone selectors.
+ */
+static const char *const acer_kb_zone_names[LINUWU_SENSE_KEYBOARD_ZONE_COUNT] = {
+	"zone1", "zone2", "zone3", "zone4"
 };
 
 static int linuwu_sense_keyboard_get_backlight(
@@ -238,6 +267,114 @@ static int linuwu_sense_keyboard_set_zone_color(
 		pr_err("Error setting KB color (zone %d): %d\n", zone + 1, err);
 
 	return err;
+}
+
+/*
+ * Scale the zone color down to the requested LED brightness and apply it.
+ * The firmware brightness is set to its maximum: the per zone brightness is
+ * carried by the color intensity, as in the multicolor software scaling
+ * model.
+ */
+static int acer_kb_led_brightness_set(struct led_classdev *led_cdev,
+				      enum led_brightness brightness)
+{
+	struct linuwu_sense_keyboard_led *zone = container_of(
+		led_cdev, struct linuwu_sense_keyboard_led, mc.led_cdev);
+	struct linuwu_sense_keyboard *kb = zone->kb;
+	struct acer_wmi *acer = kb->acer;
+	struct linuwu_sense_keyboard_backlight state = {
+		.brightness = 100,
+	};
+	u64 color;
+	int err;
+
+	led_mc_calc_color_components(&zone->mc, brightness);
+
+	color = ((u64)zone->subled[0].brightness << 16) |
+		((u64)zone->subled[1].brightness << 8) |
+		(u64)zone->subled[2].brightness;
+
+	mutex_lock(&acer->lock);
+	err = linuwu_sense_keyboard_set_backlight(acer, &state);
+	if (!err)
+		err = linuwu_sense_keyboard_set_zone_color(acer, zone->zone,
+							   color);
+	mutex_unlock(&acer->lock);
+
+	if (err)
+		pr_err("Error applying LED zone %d: %d\n", zone->zone + 1, err);
+
+	return err;
+}
+
+static u64 acer_kb_zone_color(const struct per_zone_color *zones, int zone)
+{
+	switch (zone) {
+	case 0:
+		return zones->zone1;
+	case 1:
+		return zones->zone2;
+	case 2:
+		return zones->zone3;
+	default:
+		return zones->zone4;
+	}
+}
+
+static int acer_kb_zone_led_register(struct acer_wmi *acer, int index)
+{
+	struct linuwu_sense_keyboard *kb = acer->keyboard;
+	struct linuwu_sense_keyboard_led *zone = &kb->leds[index];
+	unsigned int intensity[3];
+	u64 color;
+	int i;
+
+	zone->kb = kb;
+	zone->zone = index;
+
+	zone->mc.led_cdev.name = devm_kasprintf(acer->dev, GFP_KERNEL,
+						"%s:rgb:kbd_zoned_backlight-%s",
+						dev_name(acer->dev),
+						acer_kb_zone_names[index]);
+	if (!zone->mc.led_cdev.name)
+		return -ENOMEM;
+
+	color = acer_kb_zone_color(&kb->state.zones, index);
+	intensity[0] = (color >> 16) & 0xff;
+	intensity[1] = (color >> 8) & 0xff;
+	intensity[2] = color & 0xff;
+
+	zone->mc.led_cdev.max_brightness = 255;
+	zone->mc.led_cdev.brightness =
+		DIV_ROUND_CLOSEST(kb->state.brightness * 255, 100);
+	zone->mc.led_cdev.brightness_set_blocking = acer_kb_led_brightness_set;
+
+	zone->subled[0].color_index = LED_COLOR_ID_RED;
+	zone->subled[1].color_index = LED_COLOR_ID_GREEN;
+	zone->subled[2].color_index = LED_COLOR_ID_BLUE;
+	for (i = 0; i < 3; i++) {
+		zone->subled[i].intensity = intensity[i];
+		zone->subled[i].max_intensity = 255;
+		zone->subled[i].channel = i;
+	}
+
+	zone->mc.num_colors = 3;
+	zone->mc.subled_info = zone->subled;
+
+	return devm_led_classdev_multicolor_register(acer->dev, &zone->mc);
+}
+
+static int acer_kb_leds_init(struct acer_wmi *acer)
+{
+	int i, err;
+
+	for (i = 0; i < LINUWU_SENSE_KEYBOARD_ZONE_COUNT; i++) {
+		err = acer_kb_zone_led_register(acer, i);
+		if (err)
+			return err;
+	}
+
+	return 0;
 }
 
 /* four zone mode */
@@ -439,75 +576,6 @@ static int set_per_zone_color(struct acer_wmi *acer,
 	return 0;
 }
 
-static ssize_t per_zoned_rgb_kb_show(struct device *dev,
-				     struct device_attribute *attr, char *buf)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	struct per_zone_color output;
-	int err;
-
-	mutex_lock(&acer->lock);
-	err = get_per_zone_color(acer, &output);
-	mutex_unlock(&acer->lock);
-	if (err)
-		return -ENODEV;
-	return sysfs_emit(buf, "%06llx,%06llx,%06llx,%06llx,%d\n", output.zone1,
-			  output.zone2, output.zone3, output.zone4,
-			  output.brightness);
-}
-
-static ssize_t per_zoned_rgb_kb_store(struct device *dev,
-				      struct device_attribute *attr,
-				      const char *buf, size_t count)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	int i = 0;
-	ssize_t len;
-	char *token;
-	char str_buf[34];
-	struct per_zone_color colors;
-	char *input_ptr = str_buf;
-	int err;
-
-	len = strscpy(str_buf, buf, sizeof(str_buf));
-	if (len < 0)
-		return len;
-
-	if (len > 0 && str_buf[len - 1] == '\n')
-		str_buf[len - 1] = '\0';
-
-	/* zone1,zone2,zone3,zone4 */
-
-	while ((token = strsep(&input_ptr, ",")) && i < 4) {
-		if (strlen(token) != 6) {
-			pr_err("Invalid rgb length: %s (%lu) (must be 3 bytes)\n",
-			       token, strlen(token));
-			return -EINVAL;
-		}
-		if (kstrtoull(token, 16, &((u64 *)&colors)[i])) {
-			pr_err("Invalid hex value: %s\n", token);
-			return -EINVAL;
-		}
-		i++;
-	}
-
-	if (!token || kstrtoint(token, 10, &colors.brightness) ||
-	    colors.brightness < 0 || colors.brightness > 100) {
-		pr_err("Invalid brightness value.\n");
-		return -EINVAL;
-	}
-
-	/* set per zone colors */
-	mutex_lock(&acer->lock);
-	err = set_per_zone_color(acer, &colors);
-	mutex_unlock(&acer->lock);
-	if (err) {
-		pr_err("Error setting RGB KB status.\n");
-		return -ENODEV;
-	}
-	return count;
-}
-
 /* BackLight State */
 
 static bool kb_state_valid(const struct kb_state *state)
@@ -672,13 +740,14 @@ out:
 	return err;
 }
 
-/* Four Zoned Keyboard Attributes */
+/*
+ * Four Zoned Keyboard effect attributes. The zone colors and brightness are
+ * exposed through the LED class devices, this attribute only carries the
+ * Acer specific effect settings which the LED subsystem cannot express.
+ */
 static struct device_attribute four_zoned_rgb_mode = __ATTR(
 	four_zone_mode, 0644, four_zoned_rgb_kb_show, four_zoned_rgb_kb_store);
-static struct device_attribute per_zoned_rgb_mode = __ATTR(
-	per_zone_mode, 0644, per_zoned_rgb_kb_show, per_zoned_rgb_kb_store);
 static struct attribute *four_zoned_kb_attrs[] = { &four_zoned_rgb_mode.attr,
-						   &per_zoned_rgb_mode.attr,
 						   NULL };
 
 /* Four Zoned RGB Keyboard */
@@ -699,13 +768,24 @@ int linuwu_sense_keyboard_init(struct acer_wmi *acer)
 	if (!kb)
 		return -ENOMEM;
 
+	kb->acer = acer;
 	acer->keyboard = kb;
 
 	err = devm_device_add_group(acer->dev, &four_zoned_kb_attr_group);
 	if (err)
 		goto err_clear;
 
+	/* Restore the persisted state, then sync the driver view with the EC. */
 	four_zone_kb_state_load(acer);
+
+	mutex_lock(&acer->lock);
+	if (four_zone_kb_state_update(acer))
+		pr_warn("Could not read back the keyboard state\n");
+	mutex_unlock(&acer->lock);
+
+	err = acer_kb_leds_init(acer);
+	if (err)
+		goto err_clear;
 
 	return 0;
 
