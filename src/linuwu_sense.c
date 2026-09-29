@@ -841,6 +841,17 @@ static struct attribute_group nitro_sense_attr_group = {
  * Platform device
  */
 
+/*
+ * Publish the userspace frontends of an instance. Called by the logical
+ * platform device probe, which acer_wmi_instance_setup() triggers after the
+ * endpoint topology was confirmed and the firmware side was initialized.
+ * A failure makes this probe fail and the setup path removes the logical
+ * device again, so no partial interface stays behind. The platform profile
+ * frontend is the only best effort one: when its registration fails, the
+ * machine simply runs without profile support.
+ *
+ * Event handling (@ready) is enabled last, once every frontend is published.
+ */
 static int acer_platform_probe(struct platform_device *pdev)
 {
 	struct acer_wmi *acer = platform_get_drvdata(pdev);
@@ -848,6 +859,8 @@ static int acer_platform_probe(struct platform_device *pdev)
 
 	if (!acer)
 		return -ENODEV;
+
+	acer->platform_probe_ok = false;
 
 	err = linuwu_sense_input_init(acer);
 	if (err) {
@@ -903,6 +916,12 @@ static int acer_platform_probe(struct platform_device *pdev)
 	acer->ready = true;
 	mutex_unlock(&acer->event_lock);
 
+	/*
+	 * All frontends are published and event handling is enabled: report
+	 * the logical device as successfully probed.
+	 */
+	acer->platform_probe_ok = true;
+
 	return 0;
 }
 
@@ -927,8 +946,12 @@ static void acer_platform_remove(struct platform_device *pdev)
 	/*
 	 * All remaining resources (input, hwmon, platform profile and sysfs
 	 * groups) are devres-managed and are released by the driver core
-	 * after this callback returned.
+	 * after this callback returned. Drop the pointers so no subsystem
+	 * state can be used after it was released.
 	 */
+	acer->input = NULL;
+	acer->keyboard = NULL;
+	acer->profile = NULL;
 }
 
 /*
@@ -1025,6 +1048,8 @@ struct acer_wmi_topology {
 	unsigned long guids;
 	/* Number of distinct GUIDs in @guids. */
 	unsigned int endpoints;
+	/* Number of matching WMI devices below the WMI bus device. */
+	unsigned int devices;
 };
 
 static int acer_wmi_topology_scan(struct device *dev, void *data)
@@ -1041,6 +1066,8 @@ static int acer_wmi_topology_scan(struct device *dev, void *data)
 
 		if (!test_and_set_bit(endpoint->guid, &topo->guids))
 			topo->endpoints++;
+
+		topo->devices++;
 
 		break;
 	}
@@ -1081,8 +1108,9 @@ static struct acer_wmi *acer_wmi_instance_find(struct device *parent)
 	return NULL;
 }
 
-static struct acer_wmi *acer_wmi_instance_create(struct device *parent,
-						 unsigned int endpoints)
+static struct acer_wmi *
+acer_wmi_instance_create(struct device *parent,
+			 const struct acer_wmi_topology *topo)
 {
 	struct acer_wmi *acer;
 
@@ -1103,7 +1131,8 @@ static struct acer_wmi *acer_wmi_instance_create(struct device *parent,
 
 	acer->parent = parent;
 	acer->quirks = acer_wmi_quirks;
-	acer->wdev_expected = endpoints;
+	acer->wdev_expected = topo->endpoints;
+	acer->probes_expected = topo->devices;
 	mutex_init(&acer->lock);
 	mutex_init(&acer->event_lock);
 	INIT_LIST_HEAD(&acer->node);
@@ -1188,6 +1217,71 @@ static void acer_wmi_instance_free(struct acer_wmi *acer)
 	kfree(acer);
 }
 
+/*
+ * An instance may only be released once no endpoint is claimed any more and
+ * every matching WMI device of its WMI bus device has been probed: only then
+ * no later probe can still reference it. The caller must hold
+ * acer_wmi_instances_lock.
+ */
+static bool acer_wmi_instance_is_exhausted(const struct acer_wmi *acer)
+{
+	return !acer->wdev_count && acer->probes_seen >= acer->probes_expected;
+}
+
+static void acer_wmi_instance_drop(struct acer_wmi *acer)
+{
+	lockdep_assert_held(&acer_wmi_instances_lock);
+
+	if (acer_wmi_instance_is_exhausted(acer))
+		acer_wmi_instance_free(acer);
+}
+
+/*
+ * Advance a COLLECTING instance: set up the logical device once the complete
+ * endpoint set is claimed, or mark the instance FAILED once every expected
+ * probe has run without completing the set. Must be called with
+ * acer_wmi_instances_lock held.
+ */
+static void acer_wmi_instance_advance(struct acer_wmi *acer, struct device *dev)
+{
+	int err;
+
+	if (acer->state != ACER_WMI_COLLECTING)
+		return;
+
+	if (acer->wdev_count == acer->wdev_expected) {
+		/*
+		 * The complete endpoint set is bound: bring up the logical
+		 * platform device. It only succeeds when all its frontends
+		 * were registered, otherwise the aggregate fails without
+		 * leaving a partial interface behind.
+		 */
+		err = acer_wmi_instance_setup(acer);
+		if (err) {
+			dev_err(dev,
+				"unable to set up the logical device: %d\n",
+				err);
+			acer->state = ACER_WMI_FAILED;
+		} else {
+			acer->state = ACER_WMI_ACTIVE;
+		}
+
+		return;
+	}
+
+	/*
+	 * The endpoint set is not complete yet. Once every expected probe has
+	 * run the set can no longer be completed, because all WMI devices of
+	 * a WMI bus device were already registered when probing started.
+	 */
+	if (acer->probes_seen >= acer->probes_expected) {
+		dev_err(dev,
+			"only %u of %u Acer WMI endpoints bound, aggregate disabled\n",
+			acer->wdev_count, acer->wdev_expected);
+		acer->state = ACER_WMI_FAILED;
+	}
+}
+
 static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
 {
 	const struct acer_wmi_endpoint *endpoint = context;
@@ -1218,18 +1312,30 @@ static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
 			goto out_unlock;
 		}
 
-		acer = acer_wmi_instance_create(wdev->dev.parent,
-						topo.endpoints);
+		acer = acer_wmi_instance_create(wdev->dev.parent, &topo);
 		if (!acer) {
 			err = -ENOMEM;
 			goto out_unlock;
 		}
 	}
 
+	/*
+	 * FAILED is terminal: every expected probe already ran when the
+	 * aggregate failed, so this can only be a rebind of an endpoint. It
+	 * cannot make the aggregate work again.
+	 */
+	if (acer->state == ACER_WMI_FAILED) {
+		dev_warn(&wdev->dev, "aggregate setup already failed\n");
+		err = -ENODEV;
+		goto out_unlock;
+	}
+
+	acer->probes_seen++;
+
 	wdev_data = devm_kzalloc(&wdev->dev, sizeof(*wdev_data), GFP_KERNEL);
 	if (!wdev_data) {
 		err = -ENOMEM;
-		goto out_maybe_destroy;
+		goto out_maybe_drop;
 	}
 
 	wdev_data->acer = acer;
@@ -1243,47 +1349,30 @@ static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
 			"GUID %s is already claimed by another WMI device, refusing this device\n",
 			endpoint->guid_string);
 		err = -ENODEV;
-		goto out_maybe_destroy;
+		goto out_maybe_drop;
 	}
 	mutex_unlock(&acer->lock);
 
 	dev_set_drvdata(&wdev->dev, wdev_data);
 
-	if (acer->setup_done || acer->setup_failed) {
+	if (acer->state == ACER_WMI_ACTIVE) {
+		/* Rebind of an endpoint of an already running aggregate. */
 		mutex_unlock(&acer_wmi_instances_lock);
 		return 0;
 	}
 
-	/* Wait for the remaining endpoints of this instance to be claimed. */
-	if (acer->wdev_count < acer->wdev_expected) {
-		mutex_unlock(&acer_wmi_instances_lock);
-		return 0;
-	}
+	acer_wmi_instance_advance(acer, &wdev->dev);
 
-	err = acer_wmi_instance_setup(acer);
-	if (err) {
-		/*
-		 * The aggregate cannot be set up. All WMI devices of a WMI bus
-		 * device are registered before any of them is probed, so a
-		 * later probe can never complete the set: the instance stays
-		 * inactive without publishing any interface and is only
-		 * released once its last WMI device is removed.
-		 */
-		dev_err(&wdev->dev, "Unable to set up the logical device: %d\n",
-			err);
-		acer->setup_failed = true;
-		mutex_unlock(&acer_wmi_instances_lock);
-		return 0;
-	}
-
-	acer->setup_done = true;
 	mutex_unlock(&acer_wmi_instances_lock);
 	return 0;
 
-out_maybe_destroy:
-	/* Drop an instance which never got any WMI device */
-	if (!acer->wdev_count)
-		acer_wmi_instance_free(acer);
+out_maybe_drop:
+	/*
+	 * A probe which failed before claiming an endpoint can still be the
+	 * last expected one, so the instance state has to advance here too.
+	 */
+	acer_wmi_instance_advance(acer, &wdev->dev);
+	acer_wmi_instance_drop(acer);
 out_unlock:
 	mutex_unlock(&acer_wmi_instances_lock);
 	return err;
@@ -1312,9 +1401,8 @@ static void acer_wmi_wdev_remove(struct wmi_device *wdev)
 	acer_wmi_endpoint_release(acer, wdev_data->guid, wdev);
 	mutex_unlock(&acer->lock);
 
-	/* Free the instance once its last endpoint device is gone. */
-	if (!acer->wdev_count)
-		acer_wmi_instance_free(acer);
+	/* Drop the instance once it can never be referenced again. */
+	acer_wmi_instance_drop(acer);
 
 	mutex_unlock(&acer_wmi_instances_lock);
 }
@@ -1400,12 +1488,33 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 	platform_set_drvdata(acer->pdev, acer);
 	acer->dev = &acer->pdev->dev;
 
+	/*
+	 * This probe is triggered synchronously by the platform_device_add()
+	 * below, so @platform_probe_ok tells whether the logical device
+	 * published all its frontends.
+	 */
+	acer->platform_probe_ok = false;
 	err = platform_device_add(acer->pdev);
 	if (err) {
 		platform_device_put(acer->pdev);
 		acer->pdev = NULL;
 		acer->dev = NULL;
 		return err;
+	}
+
+	if (!acer->platform_probe_ok) {
+		/*
+		 * The logical device probe failed and released its
+		 * devres-managed frontends again. Remove the unbound device so
+		 * that no incomplete interface stays behind.
+		 */
+		platform_device_unregister(acer->pdev);
+		acer->pdev = NULL;
+		acer->dev = NULL;
+		acer->input = NULL;
+		acer->keyboard = NULL;
+		acer->profile = NULL;
+		return -ENODEV;
 	}
 
 	return 0;

@@ -18,8 +18,9 @@ enum linuwu_sense_battery_mode {
 };
 
 /*
- * Locking: the caller resolves the WMI device and serializes the calls, the
- * core driver holds acer->lock around them.
+ * Locking: the caller resolves the WMI device with linuwu_sense_endpoint_get()
+ * and holds acer->lock for the whole resolve and use sequence, so that the
+ * endpoint cannot be removed while the command is in flight.
  */
 
 /* Battery health control status */

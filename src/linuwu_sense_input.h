@@ -11,13 +11,16 @@ struct acer_wmi;
 
 /*
  * Register the hotkey input device. Does nothing when the machine has no WMI
- * event device. Must be called from the platform device probe.
+ * event device. Must be called from the logical platform device probe without
+ * acer->lock held; the function takes the lock itself.
  */
 int linuwu_sense_input_init(struct acer_wmi *acer);
 
 /*
  * Report a firmware hotkey event through the input subsystem. Does nothing
- * when the input device is not registered.
+ * when the input device is not registered. Called from the WMI event path,
+ * which serializes it with the platform device teardown through the event
+ * lock.
  */
 void linuwu_sense_input_report_hotkey(struct acer_wmi *acer, u8 key_num,
 				      u16 device_state);

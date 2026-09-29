@@ -10,7 +10,6 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
-#include <linux/delay.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/platform_profile.h>
@@ -255,44 +254,32 @@ static const struct platform_profile_ops acer_predator_v4_platform_profile_ops =
 	.profile_set = acer_predator_v4_platform_profile_set,
 };
 
-static int acer_platform_profile_setup(struct acer_wmi *acer)
+static void acer_platform_profile_setup(struct acer_wmi *acer)
 {
 	struct linuwu_sense_profile *state = acer_profile(acer);
-	const int max_retries = 10;
-	int delay_ms = 100;
+	struct device *profile_dev;
+	int err;
 
-	if (!acer->quirks->predator_v4 && !acer->quirks->nitro_sense &&
-	    !acer->quirks->nitro_v4)
-		return 0;
-
-	for (int attempt = 1; attempt <= max_retries; attempt++) {
-		struct device *profile_dev;
-
-		profile_dev = devm_platform_profile_register(
-			acer->dev, "acer-wmi", acer,
-			&acer_predator_v4_platform_profile_ops);
-		if (!IS_ERR(profile_dev)) {
-			state->dev = profile_dev;
-			state->supported = true;
-			pr_info("Platform profile registered successfully "
-				"(attempt %d)\n",
-				attempt);
-			return 0;
-		}
-		pr_warn("Platform profile registration failed (attempt %d/%d), "
-			"error: %ld\n",
-			attempt, max_retries, PTR_ERR(profile_dev));
-		if (attempt < max_retries) {
-			msleep(delay_ms);
-			delay_ms = min(delay_ms * 2, 1000);
-		}
+	/*
+	 * The platform_profile core supports several class devices and reports
+	 * deterministic failures (firmware probe errors, empty choices), so a
+	 * single attempt is enough. A machine whose firmware does not answer
+	 * the profile query simply keeps running without profile support; no
+	 * partial class device is left behind because registration failed
+	 * before publishing anything.
+	 */
+	profile_dev = devm_platform_profile_register(
+		acer->dev, "acer-wmi", acer,
+		&acer_predator_v4_platform_profile_ops);
+	if (IS_ERR(profile_dev)) {
+		err = PTR_ERR(profile_dev);
+		dev_err(acer->dev, "Failed to register platform profile: %d\n",
+			err);
+		return;
 	}
-	pr_warn("Platform profile setup failed. Continuing to load without "
-		"profile support.\n");
-	state->dev = NULL;
-	state->supported = false;
 
-	return 0;
+	state->dev = profile_dev;
+	state->supported = true;
 }
 
 int linuwu_sense_profile_init(struct acer_wmi *acer)
@@ -312,15 +299,17 @@ int linuwu_sense_profile_init(struct acer_wmi *acer)
 
 	if (acer->quirks->predator_v4) {
 		err = acer_thermal_profile_init(acer);
-		if (err) {
-			acer->profile = NULL;
-			return err;
-		}
+		if (err)
+			goto err_clear;
 	}
 
 	acer_platform_profile_setup(acer);
 
 	return 0;
+
+err_clear:
+	acer->profile = NULL;
+	return err;
 }
 
 int linuwu_sense_profile_cycle(struct acer_wmi *acer)

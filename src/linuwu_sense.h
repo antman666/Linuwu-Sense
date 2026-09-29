@@ -49,6 +49,28 @@ enum acer_wmi_guid {
 };
 
 /*
+ * Aggregate setup state of one WMI bus device.
+ *
+ * COLLECTING: the driver instance exists, but not every expected endpoint
+ * probe has run yet.
+ * ACTIVE: the complete endpoint set was set up and the logical platform
+ * device with all its frontends is published.
+ * FAILED: the endpoint set or the logical device setup failed. Terminal for
+ * this instance: all WMI devices of the WMI bus device were already registered
+ * when probing started, so no later probe can repair the device set.
+ *
+ * There is no separate SETTING_UP state because the setup runs synchronously
+ * under acer_wmi_instances_lock: the state only changes once it returned.
+ * There is no TEARING_DOWN state either because the logical device is
+ * unregistered synchronously before the instance is released.
+ */
+enum acer_wmi_state {
+	ACER_WMI_COLLECTING,
+	ACER_WMI_ACTIVE,
+	ACER_WMI_FAILED,
+};
+
+/*
  * Per physical device driver state. This structure is shared by all WMI
  * devices belonging to the same WMI bus device. It is allocated by the first
  * WMI device probe of an instance and freed once the last WMI device of that
@@ -77,9 +99,13 @@ struct acer_wmi {
 	struct wmi_device *wdevs[ACER_WMI_GUID_COUNT];
 
 	/*
-	 * Opaque state owned by the Linux subsystem frontends. The core
-	 * driver only stores the pointers, the component that allocated the
-	 * state is responsible for its content.
+	 * Opaque state owned by the Linux subsystem frontends. The pointers
+	 * are published by the logical platform device probe before @ready is
+	 * set and released by its removal after @ready was cleared, so the WMI
+	 * event path may use them under @event_lock while the subsystem
+	 * frontends use them under @lock. The core driver only stores the
+	 * pointers, the component that allocated the state is responsible for
+	 * its content.
 	 */
 	struct linuwu_sense_input *input;
 	struct linuwu_sense_keyboard *keyboard;
@@ -89,19 +115,42 @@ struct acer_wmi {
 	 * Number of distinct Acer GUIDs exposed by the WMI bus device this
 	 * instance belongs to. This is the number of endpoints that have to be
 	 * claimed before the instance can be set up. Captured when the
-	 * instance is created and protected by acer_wmi_instances_lock.
+	 * instance is created. Protected by acer_wmi_instances_lock.
 	 */
 	unsigned int wdev_expected;
 
 	/*
-	 * Number of endpoints of this instance that are currently claimed,
-	 * plus the instance setup state. All three fields are protected by
-	 * acer_wmi_instances_lock, the claim itself additionally by @lock.
+	 * Number of matching WMI devices below the WMI bus device when the
+	 * instance was created, and the number of probe callbacks of this
+	 * instance seen so far. Once every expected probe has run, no later
+	 * probe can complete the endpoint set. Protected by
+	 * acer_wmi_instances_lock.
+	 */
+	unsigned int probes_expected;
+	unsigned int probes_seen;
+
+	/*
+	 * Number of endpoints of this instance that are currently claimed.
+	 * Protected by acer_wmi_instances_lock, each claim and release
+	 * additionally by @lock.
 	 */
 	unsigned int wdev_count;
-	bool setup_done;
-	/* Last setup attempt failed; the instance stays inactive. */
-	bool setup_failed;
+
+	/*
+	 * Aggregate setup state. Runs from COLLECTING to ACTIVE when the
+	 * complete endpoint set was set up, or to FAILED when the endpoint
+	 * set or the setup of the logical device failed. FAILED is terminal:
+	 * once every expected probe has run no later probe can repair the set.
+	 * Protected by acer_wmi_instances_lock.
+	 */
+	enum acer_wmi_state state;
+
+	/*
+	 * Set by the logical platform device probe once all frontends were
+	 * published. Read by the setup path directly after
+	 * platform_device_add() triggered the probe.
+	 */
+	bool platform_probe_ok;
 
 	/* The capabilities this interface provides */
 	u32 capability;
@@ -110,17 +159,19 @@ struct acer_wmi {
 	const struct linuwu_sense_quirks *quirks;
 
 	/*
-	 * Protects the cached fan speed pair and serializes the WMI
-	 * operations issued by the control surface, the WMI event path and
-	 * the subsystem frontends. May be held across ACPI/WMI operations,
-	 * so it must stay a mutex.
+	 * Protects the endpoint claims in @wdevs[] and the cached fan speed
+	 * pair, and serializes the Acer WMI method invocations issued by the
+	 * control surface, the WMI event path and the subsystem frontends.
+	 * May be held across ACPI/WMI operations, so it must stay a mutex.
+	 *
+	 * Lock order: acer_wmi_instances_lock -> @event_lock -> @lock.
 	 */
 	struct mutex lock;
 
 	/*
-	 * Serializes WMI event processing and prevents it from running while
-	 * the platform device is being torn down. Must be a mutex because the
-	 * notify path may sleep.
+	 * Serializes the WMI event path and protects @ready. The event path
+	 * acquires it before @lock, so it must never be taken while @lock is
+	 * held. Must be a mutex because the notify path may sleep.
 	 */
 	struct mutex event_lock;
 	bool ready;

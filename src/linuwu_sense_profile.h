@@ -11,12 +11,14 @@ struct acer_wmi;
 
 /*
  * Register the platform_profile handler and restore the thermal profile
- * selected by the firmware. Must be called from the platform device probe.
+ * selected by the firmware. Must be called from the logical platform device
+ * probe without acer->lock held; the function takes the lock itself.
  */
 int linuwu_sense_profile_init(struct acer_wmi *acer);
 
 /*
- * Cycle to the next thermal profile, as requested by the turbo key.
+ * Cycle to the next thermal profile, as requested by the turbo key. Takes
+ * acer->lock itself and may be called from the WMI event path.
  */
 int linuwu_sense_profile_cycle(struct acer_wmi *acer);
 

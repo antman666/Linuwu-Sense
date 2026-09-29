@@ -28,10 +28,11 @@ enum linuwu_sense_gaming_sensor {
  * pure predicate.
  *
  * None of these commands touches any cached driver state: the WMI device is
- * resolved at call time, and the Acer firmware profile encoding stays inside
- * this backend. acer->lock is the serialization domain for the Acer WMI
- * operations of the control surface, the WMI event path and the Linux
- * subsystem frontends.
+ * resolved through linuwu_sense_endpoint_get() at call time and is used while
+ * the lock is held, and the Acer firmware profile encoding stays inside this
+ * backend. acer->lock is the serialization domain for the Acer WMI operations
+ * of the control surface, the WMI event path and the Linux subsystem
+ * frontends.
  */
 
 /* Whether the machine currently runs on AC power. */
