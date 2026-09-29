@@ -23,17 +23,11 @@
 #include <linux/slab.h>
 #include <linux/string.h>
 #include <linux/types.h>
-#include <linux/unaligned.h>
 #include <linux/wmi.h>
 
 #include "linuwu_sense.h"
+#include "linuwu_sense_apge.h"
 #include "linuwu_sense_battery.h"
-
-/*
- * Method IDs of the WMID APGE device
- */
-#define ACER_WMID_SET_FUNCTION 1
-#define ACER_WMID_GET_FUNCTION 2
 
 /*
  * Method IDs of the WMID battery device
@@ -65,47 +59,15 @@ struct set_battery_health_control_output {
 	u8 uReservedOut;
 } __packed;
 
-/*
- * Decode the result of one of the APGE function commands. Some of the
- * commands are only answered with a u32 value while others return a full u64
- * value.
- */
-static int linuwu_sense_battery_decode_result(const struct wmi_buffer *output,
-					      u64 *result)
-{
-	if (output->length >= sizeof(*result))
-		*result = get_unaligned_le64(output->data);
-	else if (output->length >= sizeof(u32))
-		*result = get_unaligned_le32(output->data);
-	else
-		return -EIO;
-
-	return 0;
-}
-
 int linuwu_sense_battery_get_usb_charging(struct wmi_device *wdev, int *percent)
 {
-	u64 input_value = 0x4;
-	struct wmi_buffer input = {
-		.length = sizeof(input_value),
-		.data = &input_value,
-	};
-	struct wmi_buffer output = {};
 	u64 result;
 	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	err = wmidev_invoke_method(wdev, 0, ACER_WMID_GET_FUNCTION, &input,
-				   &output, sizeof(u32));
-	if (err) {
-		pr_err("Error getting usb charging status: %d\n", err);
-		return err;
-	}
-
-	err = linuwu_sense_battery_decode_result(&output, &result);
-	kfree(output.data);
+	err = linuwu_sense_apge_get_function(wdev, 0x4, &result);
 	if (err) {
 		pr_err("Error getting usb charging status: %d\n", err);
 		return err;
@@ -124,11 +86,6 @@ int linuwu_sense_battery_get_usb_charging(struct wmi_device *wdev, int *percent)
 int linuwu_sense_battery_set_usb_charging(struct wmi_device *wdev, u8 percent)
 {
 	u64 input_value;
-	struct wmi_buffer input = {
-		.length = sizeof(input_value),
-		.data = &input_value,
-	};
-	struct wmi_buffer output = {};
 	u64 result;
 	int err;
 
@@ -142,15 +99,7 @@ int linuwu_sense_battery_set_usb_charging(struct wmi_device *wdev, u8 percent)
 		      percent == 20 ? 1314564 :
 		      percent == 30 ? 1969924 :
 				      663300;
-	err = wmidev_invoke_method(wdev, 0, ACER_WMID_SET_FUNCTION, &input,
-				   &output, sizeof(u32));
-	if (err) {
-		pr_err("Error setting usb charging status: %d\n", err);
-		return err;
-	}
-
-	err = linuwu_sense_battery_decode_result(&output, &result);
-	kfree(output.data);
+	err = linuwu_sense_apge_set_function_value(wdev, input_value, &result);
 	if (err) {
 		pr_err("Error setting usb charging status: %d\n", err);
 		return err;

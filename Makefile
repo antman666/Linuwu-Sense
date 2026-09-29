@@ -20,6 +20,7 @@
 obj-m := linuwu_sense.o
 linuwu_sense-y := \
 	src/linuwu_sense.o \
+	src/linuwu_sense_apge.o \
 	src/linuwu_sense_battery.o \
 	src/linuwu_sense_event.o \
 	src/linuwu_sense_fan.o \

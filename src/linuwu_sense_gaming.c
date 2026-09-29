@@ -4,7 +4,8 @@
  *
  *  This module implements the hardware commands of the Predator Gaming WMI
  *  interface, the Predator/Nitro sensor readings of its "get system info"
- *  command and the system function commands of the WMID APGE device. It only
+ *  command and the semantic APGE system function operations. The APGE wire
+ *  protocol itself is implemented in linuwu_sense_apge.c. This module only
  *  exposes semantic operations to the rest of the driver.
  */
 
@@ -20,6 +21,7 @@
 #include <linux/wmi.h>
 
 #include "linuwu_sense.h"
+#include "linuwu_sense_apge.h"
 #include "linuwu_sense_gaming.h"
 
 /*
@@ -31,98 +33,36 @@
 #define ACER_WMID_SET_GAMING_MISC_SETTING_METHODID 22
 #define ACER_WMID_GET_GAMING_MISC_SETTING_METHODID 23
 
-/*
- * Method IDs of the WMID APGE device
- */
-#define ACER_WMID_SET_FUNCTION 1
-#define ACER_WMID_GET_FUNCTION 2
-
-/*
- * The system function command of the WMID APGE device.
- *
- * Hotkey Customized Setting and Acer Application Status.
- * Set Device Default Value and Report Acer Application Status.
- * When Acer Application starts, it will run this method to inform
- * BIOS/EC that Acer Application is on.
- * App Status
- *	Bit[0]: Launch Manager Status
- *	Bit[1]: ePM Status
- *	Bit[2]: Device Control Status
- *	Bit[3]: Acer Power Button Utility Status
- *	Bit[4]: RF Button Status
- *	Bit[5]: ODD PM Status
- *	Bit[6]: Device Default Value Control
- *	Bit[7]: Hall Sensor Application Status
- */
-struct func_input_params {
-	u8 function_num; /* Function Number */
-	u16 commun_devices; /* Communication type devices default status */
-	u16 devices; /* Other type devices default status */
-	u8 app_status; /* Acer Device Status. LM, ePM, RF Button... */
-	u8 app_mask; /* Bit mask to app_status */
-	u8 reserved;
-} __packed;
-
-struct func_return_value {
-	u8 error_code; /* Error Code */
-	u8 ec_return_value; /* EC Return Value */
-	u16 reserved;
-} __packed;
-
-static int
-linuwu_sense_gaming_set_function_mode(struct acer_wmi *acer,
-				      struct func_input_params *params,
-				      struct func_return_value *return_value)
+static int linuwu_sense_gaming_set_app_status(
+	struct acer_wmi *acer, u8 app_status, u8 app_mask,
+	struct linuwu_sense_apge_function_result *result)
 {
-	struct wmi_device *wdev =
-		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE);
-	struct wmi_buffer input = {
-		.length = sizeof(*params),
-		.data = params,
+	struct linuwu_sense_apge_app_status input = {
+		.function_num = 0x1,
+		.commun_devices = 0xFFFF,
+		.devices = 0xFFFF,
+		.app_status = app_status,
+		.app_mask = app_mask,
 	};
-	struct wmi_buffer output = {};
-	int err;
 
-	if (!wdev)
-		return -ENODEV;
-
-	err = wmidev_invoke_method(wdev, 0, ACER_WMID_SET_FUNCTION, &input,
-				   &output, sizeof(*return_value));
-	if (err)
-		return err;
-
-	if (output.length < sizeof(*return_value)) {
-		err = -EIO;
-		goto out;
-	}
-
-	memcpy(return_value, output.data, sizeof(*return_value));
-
-out:
-	kfree(output.data);
-	return err;
+	return linuwu_sense_apge_set_app_status(
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE),
+		&input, result);
 }
 
 int linuwu_sense_gaming_enable_ec_raw(struct acer_wmi *acer)
 {
-	struct func_return_value return_value;
-	struct func_input_params params = {
-		.function_num = 0x1,
-		.commun_devices = 0xFFFF,
-		.devices = 0xFFFF,
-		.app_status = 0x00, /* Launch Manager Deactive */
-		.app_mask = 0x01,
-	};
+	struct linuwu_sense_apge_function_result result;
 	int err;
 
-	err = linuwu_sense_gaming_set_function_mode(acer, &params,
-						    &return_value);
+	/* Launch Manager deactivated */
+	err = linuwu_sense_gaming_set_app_status(acer, 0x00, 0x01, &result);
 	if (err)
 		return err;
 
-	if (return_value.error_code || return_value.ec_return_value)
+	if (result.error_code || result.ec_return_value)
 		pr_warn("Enabling EC raw mode failed: 0x%x - 0x%x\n",
-			return_value.error_code, return_value.ec_return_value);
+			result.error_code, result.ec_return_value);
 	else
 		pr_info("Enabled EC raw mode\n");
 
@@ -131,48 +71,34 @@ int linuwu_sense_gaming_enable_ec_raw(struct acer_wmi *acer)
 
 int linuwu_sense_gaming_enable_launch_manager(struct acer_wmi *acer)
 {
-	struct func_return_value return_value;
-	struct func_input_params params = {
-		.function_num = 0x1,
-		.commun_devices = 0xFFFF,
-		.devices = 0xFFFF,
-		.app_status = 0x01, /* Launch Manager Active */
-		.app_mask = 0x01,
-	};
+	struct linuwu_sense_apge_function_result result;
 	int err;
 
-	err = linuwu_sense_gaming_set_function_mode(acer, &params,
-						    &return_value);
+	/* Launch Manager Active */
+	err = linuwu_sense_gaming_set_app_status(acer, 0x01, 0x01, &result);
 	if (err)
 		return err;
 
-	if (return_value.error_code || return_value.ec_return_value)
+	if (result.error_code || result.ec_return_value)
 		pr_warn("Enabling Launch Manager failed: 0x%x - 0x%x\n",
-			return_value.error_code, return_value.ec_return_value);
+			result.error_code, result.ec_return_value);
 
 	return 0;
 }
 
 int linuwu_sense_gaming_enable_rf_button(struct acer_wmi *acer)
 {
-	struct func_return_value return_value;
-	struct func_input_params params = {
-		.function_num = 0x1,
-		.commun_devices = 0xFFFF,
-		.devices = 0xFFFF,
-		.app_status = 0x10, /* RF Button Active */
-		.app_mask = 0x10,
-	};
+	struct linuwu_sense_apge_function_result result;
 	int err;
 
-	err = linuwu_sense_gaming_set_function_mode(acer, &params,
-						    &return_value);
+	/* RF Button Active */
+	err = linuwu_sense_gaming_set_app_status(acer, 0x10, 0x10, &result);
 	if (err)
 		return err;
 
-	if (return_value.error_code || return_value.ec_return_value)
+	if (result.error_code || result.ec_return_value)
 		pr_warn("Enabling RF Button failed: 0x%x - 0x%x\n",
-			return_value.error_code, return_value.ec_return_value);
+			result.error_code, result.ec_return_value);
 
 	return 0;
 }
@@ -592,27 +518,13 @@ int linuwu_sense_gaming_get_backlight_timeout(struct acer_wmi *acer, int *state)
 {
 	struct wmi_device *wdev =
 		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE);
-	u64 input_value = 0x88401;
-	struct wmi_buffer input = {
-		.length = sizeof(input_value),
-		.data = &input_value,
-	};
-	struct wmi_buffer output = {};
 	u64 result;
 	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	err = wmidev_invoke_method(wdev, 0, ACER_WMID_GET_FUNCTION, &input,
-				   &output, sizeof(u32));
-	if (err) {
-		pr_err("Error getting backlight_timeout status: %d\n", err);
-		return err;
-	}
-
-	err = linuwu_sense_gaming_decode_result(&output, &result);
-	kfree(output.data);
+	err = linuwu_sense_apge_get_function(wdev, 0x88401, &result);
 	if (err) {
 		pr_err("Error getting backlight_timeout status: %d\n", err);
 		return err;
@@ -628,28 +540,15 @@ int linuwu_sense_gaming_set_backlight_timeout(struct acer_wmi *acer,
 {
 	struct wmi_device *wdev =
 		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE);
-	u64 input_value = enable ? 0x1E0000088402 : 0x88402;
-	struct wmi_buffer input = {
-		.length = sizeof(input_value),
-		.data = &input_value,
-	};
-	struct wmi_buffer output = {};
 	u64 result;
 	int err;
 
 	if (!wdev)
 		return -ENODEV;
 
-	pr_info("bascklight_timeout set value: %d\n", enable);
-	err = wmidev_invoke_method(wdev, 0, ACER_WMID_SET_FUNCTION, &input,
-				   &output, sizeof(u32));
-	if (err) {
-		pr_err("Error setting backlight_timeout status: %d\n", err);
-		return err;
-	}
-
-	err = linuwu_sense_gaming_decode_result(&output, &result);
-	kfree(output.data);
+	pr_info("backlight_timeout set value: %d\n", enable);
+	err = linuwu_sense_apge_set_function_value(
+		wdev, enable ? 0x1E0000088402 : 0x88402, &result);
 	if (err) {
 		pr_err("Error setting backlight_timeout status: %d\n", err);
 		return err;
