@@ -74,7 +74,8 @@ linuwu_sense_gaming_set_function_mode(struct acer_wmi *acer,
 				      struct func_input_params *params,
 				      struct func_return_value *return_value)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE);
 	struct wmi_buffer input = {
 		.length = sizeof(*params),
 		.data = params,
@@ -226,7 +227,8 @@ static int linuwu_sense_gaming_decode_result(const struct wmi_buffer *output,
 static int linuwu_sense_gaming_get_sys_info(struct acer_wmi *acer, u32 command,
 					    u64 *out)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u64 input_value = command;
 	struct wmi_buffer input = {
 		.length = sizeof(input_value),
@@ -320,7 +322,8 @@ int linuwu_sense_gaming_read_sensor(struct acer_wmi *acer,
 static int linuwu_sense_gaming_set_misc_setting(struct acer_wmi *acer,
 						u8 setting, u8 value)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u64 input_value = 0;
 	struct wmi_buffer input = {
 		.length = sizeof(input_value),
@@ -357,7 +360,8 @@ static int linuwu_sense_gaming_set_misc_setting(struct acer_wmi *acer,
 static int linuwu_sense_gaming_get_misc_setting(struct acer_wmi *acer,
 						u8 setting, u8 *value)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u32 input_value = 0;
 	struct wmi_buffer input = {
 		.length = sizeof(input_value),
@@ -514,7 +518,8 @@ int linuwu_sense_gaming_get_supported_thermal_profiles(struct acer_wmi *acer,
 
 int linuwu_sense_gaming_get_lcd_override(struct acer_wmi *acer, int *state)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u64 input_value = 0x00;
 	struct wmi_buffer input = {
 		.length = sizeof(input_value),
@@ -549,7 +554,8 @@ int linuwu_sense_gaming_get_lcd_override(struct acer_wmi *acer, int *state)
 
 int linuwu_sense_gaming_set_lcd_override(struct acer_wmi *acer, bool enable)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u64 input_value = enable ? 0x1000000000010 : 0x10;
 	struct wmi_buffer input = {
 		.length = sizeof(input_value),
@@ -584,7 +590,8 @@ int linuwu_sense_gaming_set_lcd_override(struct acer_wmi *acer, bool enable)
 
 int linuwu_sense_gaming_get_backlight_timeout(struct acer_wmi *acer, int *state)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE);
 	u64 input_value = 0x88401;
 	struct wmi_buffer input = {
 		.length = sizeof(input_value),
@@ -619,7 +626,8 @@ int linuwu_sense_gaming_get_backlight_timeout(struct acer_wmi *acer, int *state)
 int linuwu_sense_gaming_set_backlight_timeout(struct acer_wmi *acer,
 					      bool enable)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_APGE];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE);
 	u64 input_value = enable ? 0x1E0000088402 : 0x88402;
 	struct wmi_buffer input = {
 		.length = sizeof(input_value),
@@ -654,7 +662,8 @@ int linuwu_sense_gaming_set_backlight_timeout(struct acer_wmi *acer,
 int linuwu_sense_gaming_get_boot_animation_sound(struct acer_wmi *acer,
 						 int *state)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u64 input_value = 0;
 	struct wmi_buffer input = {
 		.length = sizeof(input_value),
@@ -692,7 +701,8 @@ int linuwu_sense_gaming_get_boot_animation_sound(struct acer_wmi *acer,
 int linuwu_sense_gaming_set_boot_animation_sound(struct acer_wmi *acer,
 						 bool enable)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u64 input_value = 0;
 	struct wmi_buffer input = {
 		.length = sizeof(input_value),

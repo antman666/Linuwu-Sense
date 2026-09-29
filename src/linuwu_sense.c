@@ -55,14 +55,13 @@ module_param(ec_raw_mode, bool, 0444);
 MODULE_PARM_DESC(ec_raw_mode, "Enable EC raw mode");
 
 /*
- * Per WMI device state. Every matching WMI device gets its own instance of
- * this structure, bound to the WMI device via dev_set_drvdata().
+ * Per WMI device state. Every matching WMI device that claimed its GUID gets
+ * its own instance of this structure, bound to the WMI device via
+ * dev_set_drvdata().
  */
 struct acer_wmi_wdev {
 	struct acer_wmi *acer;
-	struct wmi_device *wdev;
 	enum acer_wmi_guid guid;
-	struct list_head node;
 };
 
 /*
@@ -126,6 +125,18 @@ static bool has_cap(const struct acer_wmi *acer, u32 cap)
 	return acer->capability & cap;
 }
 
+/*
+ * Resolve the WMI device that claimed @guid. See linuwu_sense.h for the
+ * locking contract.
+ */
+struct wmi_device *linuwu_sense_endpoint_get(struct acer_wmi *acer,
+					     enum acer_wmi_guid guid)
+{
+	lockdep_assert_held(&acer->lock);
+
+	return acer->wdevs[guid];
+}
+
 /* Fan Speed */
 static int acer_set_fan_speed(struct acer_wmi *acer, int t_cpu_fan_speed,
 			      int t_gpu_fan_speed);
@@ -143,7 +154,7 @@ static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
 
 	if (!acer_turbo_fan_supported(acer))
 		return -EOPNOTSUPP;
-	wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	if (!wdev)
 		return -ENODEV;
 
@@ -208,7 +219,8 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 		    has_cap(acer, ACER_CAP_NITRO_SENSE_V4)) {
 			mutex_lock(&acer->lock);
 			err = linuwu_sense_battery_set_mode(
-				acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+				linuwu_sense_endpoint_get(
+					acer, ACER_WMI_GUID_WMID_BATTERY),
 				LINUWU_SENSE_BATTERY_MODE_CALIBRATION,
 				event.enabled);
 			mutex_unlock(&acer->lock);
@@ -237,7 +249,8 @@ static ssize_t predator_usb_charging_show(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_battery_get_usb_charging(
-		acer->wdevs[ACER_WMI_GUID_WMID_APGE], &percent);
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE),
+		&percent);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return -ENODEV;
@@ -260,7 +273,7 @@ static ssize_t predator_usb_charging_store(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_battery_set_usb_charging(
-		acer->wdevs[ACER_WMI_GUID_WMID_APGE], val);
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE), val);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return -ENODEV;
@@ -282,7 +295,7 @@ static ssize_t predator_battery_limit_show(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_battery_get_mode(
-		acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_BATTERY),
 		LINUWU_SENSE_BATTERY_MODE_HEALTH, &enabled);
 	mutex_unlock(&acer->lock);
 	if (err)
@@ -307,7 +320,7 @@ static ssize_t predator_battery_limit_store(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_battery_set_mode(
-		acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_BATTERY),
 		LINUWU_SENSE_BATTERY_MODE_HEALTH, val);
 	mutex_unlock(&acer->lock);
 	if (err)
@@ -326,7 +339,7 @@ static ssize_t predator_battery_calibration_show(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_battery_get_mode(
-		acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_BATTERY),
 		LINUWU_SENSE_BATTERY_MODE_CALIBRATION, &enabled);
 	mutex_unlock(&acer->lock);
 	if (err)
@@ -351,7 +364,7 @@ static ssize_t preadtor_battery_calibration_store(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_battery_set_mode(
-		acer->wdevs[ACER_WMI_GUID_WMID_BATTERY],
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_BATTERY),
 		LINUWU_SENSE_BATTERY_MODE_CALIBRATION, val);
 	mutex_unlock(&acer->lock);
 	if (err)
@@ -366,7 +379,8 @@ static ssize_t preadtor_battery_calibration_store(struct device *dev,
 static int acer_set_fan_speed(struct acer_wmi *acer, int t_cpu_fan_speed,
 			      int t_gpu_fan_speed)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	int err;
 
 	if (!wdev)
@@ -560,7 +574,7 @@ static ssize_t predator_turbo_mode_show(struct device *dev,
 		return -EOPNOTSUPP;
 
 	mutex_lock(&acer->lock);
-	wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	if (!wdev) {
 		err = -ENODEV;
 		goto out;
@@ -934,17 +948,125 @@ static struct platform_driver acer_platform_driver = {
 
 /*
  * WMI device handling
+ *
+ * A WMI bus device of an Acer Predator/Nitro laptop exposes the Acer
+ * interface as several WMI devices with different GUIDs. The driver needs one
+ * device per GUID: the APGE, GAMING and BATTERY endpoints are required for
+ * the aggregate to work at all, while the event endpoint only provides the
+ * hotkey input frontend.
+ *
+ * The WMI core guarantees that all WMI devices of a WMI bus device are
+ * registered before any of them is probed: wmi_add_device() adds a device link
+ * from each WMI device to the platform device which owns the _WDG block, and
+ * such a consumer is not probed before the supplier finished probing.
+ *
+ * An endpoint that disappears after the aggregate was set up does not tear
+ * the aggregate down: the operations that need it fail with -ENODEV while the
+ * remaining frontends keep working. The aggregate itself is only released
+ * together with the last WMI device of its WMI bus device.
  */
+struct acer_wmi_endpoint {
+	enum acer_wmi_guid guid;
+	const char *guid_string;
+	bool required;
+};
+
+static const struct acer_wmi_endpoint acer_wmi_endpoints[ACER_WMI_GUID_COUNT] = {
+	[ACER_WMI_GUID_WMID_APGE] = {
+		.guid = ACER_WMI_GUID_WMID_APGE,
+		.guid_string = WMID_GUID3,
+		.required = true,
+	},
+	[ACER_WMI_GUID_WMID_GAMING] = {
+		.guid = ACER_WMI_GUID_WMID_GAMING,
+		.guid_string = WMID_GUID4,
+		.required = true,
+	},
+	[ACER_WMI_GUID_WMID_BATTERY] = {
+		.guid = ACER_WMI_GUID_WMID_BATTERY,
+		.guid_string = WMID_GUID5,
+		.required = true,
+	},
+	[ACER_WMI_GUID_EVENT] = {
+		.guid = ACER_WMI_GUID_EVENT,
+		.guid_string = ACERWMID_EVENT_GUID,
+		.required = false,
+	},
+};
+
 static const struct wmi_device_id acer_wmi_id_table[] = {
-	{ WMID_GUID3, (const void *)(uintptr_t)ACER_WMI_GUID_WMID_APGE },
-	{ WMID_GUID4, (const void *)(uintptr_t)ACER_WMI_GUID_WMID_GAMING },
-	{ WMID_GUID5, (const void *)(uintptr_t)ACER_WMI_GUID_WMID_BATTERY },
-	{ ACERWMID_EVENT_GUID, (const void *)(uintptr_t)ACER_WMI_GUID_EVENT },
+	{
+		.guid_string = WMID_GUID3,
+		.context = &acer_wmi_endpoints[ACER_WMI_GUID_WMID_APGE],
+	},
+	{
+		.guid_string = WMID_GUID4,
+		.context = &acer_wmi_endpoints[ACER_WMI_GUID_WMID_GAMING],
+	},
+	{
+		.guid_string = WMID_GUID5,
+		.context = &acer_wmi_endpoints[ACER_WMI_GUID_WMID_BATTERY],
+	},
+	{
+		.guid_string = ACERWMID_EVENT_GUID,
+		.context = &acer_wmi_endpoints[ACER_WMI_GUID_EVENT],
+	},
 	{}
 };
 MODULE_DEVICE_TABLE(wmi, acer_wmi_id_table);
 
 static int acer_wmi_instance_setup(struct acer_wmi *acer);
+
+/*
+ * The Acer GUIDs exposed by one WMI bus device.
+ */
+struct acer_wmi_topology {
+	/* Bitmap of the GUIDs exposed below the WMI bus device. */
+	unsigned long guids;
+	/* Number of distinct GUIDs in @guids. */
+	unsigned int endpoints;
+};
+
+static int acer_wmi_topology_scan(struct device *dev, void *data)
+{
+	struct acer_wmi_topology *topo = data;
+	const char *name = dev_name(dev);
+	const struct wmi_device_id *id;
+
+	for (id = acer_wmi_id_table; id->guid_string[0]; id++) {
+		const struct acer_wmi_endpoint *endpoint = id->context;
+
+		if (strncasecmp(name, id->guid_string, strlen(id->guid_string)))
+			continue;
+
+		if (!test_and_set_bit(endpoint->guid, &topo->guids))
+			topo->endpoints++;
+
+		break;
+	}
+
+	return 0;
+}
+
+static bool acer_wmi_topology_is_supported(struct device *dev,
+					   const struct acer_wmi_topology *topo)
+{
+	enum acer_wmi_guid guid;
+
+	for (guid = 0; guid < ACER_WMI_GUID_COUNT; guid++) {
+		if (!acer_wmi_endpoints[guid].required ||
+		    test_bit(guid, &topo->guids))
+			continue;
+
+		dev_warn(
+			dev,
+			"required Acer WMI interface %s is missing, refusing to bind\n",
+			acer_wmi_endpoints[guid].guid_string);
+		return false;
+	}
+
+	return true;
+}
 
 static struct acer_wmi *acer_wmi_instance_find(struct device *parent)
 {
@@ -959,7 +1081,8 @@ static struct acer_wmi *acer_wmi_instance_find(struct device *parent)
 	return NULL;
 }
 
-static struct acer_wmi *acer_wmi_instance_create(struct device *parent)
+static struct acer_wmi *acer_wmi_instance_create(struct device *parent,
+						 unsigned int endpoints)
 {
 	struct acer_wmi *acer;
 
@@ -980,38 +1103,56 @@ static struct acer_wmi *acer_wmi_instance_create(struct device *parent)
 
 	acer->parent = parent;
 	acer->quirks = acer_wmi_quirks;
+	acer->wdev_expected = endpoints;
 	mutex_init(&acer->lock);
 	mutex_init(&acer->event_lock);
 	INIT_LIST_HEAD(&acer->node);
-	INIT_LIST_HEAD(&acer->wdev_list);
 	list_add_tail(&acer->node, &acer_wmi_instances);
 
 	return acer;
 }
 
 /*
- * All WMI devices of a WMI bus device are registered before any of them is
- * bound to a driver (the WMI core adds a device link for this), but they are
- * probed one after another. The interface type and the available features
- * can only be detected from the complete set of WMI devices, so an instance
- * is set up once all matching WMI devices have probed. The WMI core names
- * WMI devices after their GUID, which allows to count the matching devices
- * below the WMI bus device.
+ * Claim the endpoint @guid for @wdev. A GUID identifies a WMI device type,
+ * not a unique device: the WMI bus allows several WMI devices to share a GUID
+ * and the WMI core only makes a driver with no_singleton bind all of them.
+ * This driver uses one device per GUID, so the first device to bind claims
+ * the GUID and every further device of the same GUID is refused.
+ *
+ * The caller must hold acer->lock, so that the claim is serialized with every
+ * lookup of acer->wdevs[].
  */
-static int acer_wmi_count_matching_wdevs(struct device *dev, void *data)
+static bool acer_wmi_endpoint_claim(struct acer_wmi *acer,
+				    enum acer_wmi_guid guid,
+				    struct wmi_device *wdev)
 {
-	unsigned int *count = data;
-	const struct wmi_device_id *id;
+	lockdep_assert_held(&acer->lock);
 
-	for (id = acer_wmi_id_table; id->guid_string[0]; id++) {
-		if (!strncasecmp(dev_name(dev), id->guid_string,
-				 strlen(id->guid_string))) {
-			(*count)++;
-			break;
-		}
-	}
+	if (acer->wdevs[guid])
+		return false;
 
-	return 0;
+	acer->wdevs[guid] = wdev;
+	acer->wdev_count++;
+
+	return true;
+}
+
+/*
+ * Release a claim. The claim is never handed over to another WMI device with
+ * the same GUID: a replacement would silently change the device used for the
+ * firmware method invocations. The caller must hold acer->lock.
+ */
+static void acer_wmi_endpoint_release(struct acer_wmi *acer,
+				      enum acer_wmi_guid guid,
+				      struct wmi_device *wdev)
+{
+	lockdep_assert_held(&acer->lock);
+
+	if (acer->wdevs[guid] != wdev)
+		return;
+
+	acer->wdevs[guid] = NULL;
+	acer->wdev_count--;
 }
 
 /*
@@ -1049,10 +1190,10 @@ static void acer_wmi_instance_free(struct acer_wmi *acer)
 
 static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
 {
-	enum acer_wmi_guid guid = (enum acer_wmi_guid)(uintptr_t)context;
+	const struct acer_wmi_endpoint *endpoint = context;
+	struct acer_wmi_topology topo = {};
 	struct acer_wmi_wdev *wdev_data;
 	struct acer_wmi *acer;
-	unsigned int present = 0;
 	int err;
 
 	mutex_lock(&acer_wmi_instances_lock);
@@ -1064,17 +1205,27 @@ static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
 
 	acer = acer_wmi_instance_find(wdev->dev.parent);
 	if (!acer) {
-		acer = acer_wmi_instance_create(wdev->dev.parent);
+		/*
+		 * All WMI devices of a WMI bus device are already registered
+		 * when the first of them is probed, so the complete topology
+		 * can be validated before the instance is created. Machines
+		 * without all required Acer interfaces are not supported.
+		 */
+		device_for_each_child(wdev->dev.parent, &topo,
+				      acer_wmi_topology_scan);
+		if (!acer_wmi_topology_is_supported(&wdev->dev, &topo)) {
+			err = -ENODEV;
+			goto out_unlock;
+		}
+
+		acer = acer_wmi_instance_create(wdev->dev.parent,
+						topo.endpoints);
 		if (!acer) {
 			err = -ENOMEM;
 			goto out_unlock;
 		}
 	}
 
-	/*
-	 * setup_failed records a failed attempt, not a permanent instance
-	 * state. A later WMI probe may complete the set and retry setup.
-	 */
 	wdev_data = devm_kzalloc(&wdev->dev, sizeof(*wdev_data), GFP_KERNEL);
 	if (!wdev_data) {
 		err = -ENOMEM;
@@ -1082,31 +1233,29 @@ static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
 	}
 
 	wdev_data->acer = acer;
-	wdev_data->wdev = wdev;
-	wdev_data->guid = guid;
-	INIT_LIST_HEAD(&wdev_data->node);
+	wdev_data->guid = endpoint->guid;
+
+	mutex_lock(&acer->lock);
+	if (!acer_wmi_endpoint_claim(acer, endpoint->guid, wdev)) {
+		mutex_unlock(&acer->lock);
+		dev_warn(
+			&wdev->dev,
+			"GUID %s is already claimed by another WMI device, refusing this device\n",
+			endpoint->guid_string);
+		err = -ENODEV;
+		goto out_maybe_destroy;
+	}
+	mutex_unlock(&acer->lock);
+
 	dev_set_drvdata(&wdev->dev, wdev_data);
 
-	/* A GUID identifies a WMI device type, not a unique device. */
-	list_add_tail(&wdev_data->node, &acer->wdev_list);
-	if (!acer->wdevs[guid])
-		acer->wdevs[guid] = wdev;
-	else
-		dev_warn(&wdev->dev, "Multiple WMI devices share this GUID\n");
-
-	acer->wdev_count++;
-	acer->setup_failed = false;
-
-	if (acer->setup_done) {
+	if (acer->setup_done || acer->setup_failed) {
 		mutex_unlock(&acer_wmi_instances_lock);
 		return 0;
 	}
 
-	device_for_each_child(acer->parent, &present,
-			      acer_wmi_count_matching_wdevs);
-
-	/* Wait for the remaining WMI devices of this instance to probe. */
-	if (acer->wdev_count < present) {
+	/* Wait for the remaining endpoints of this instance to be claimed. */
+	if (acer->wdev_count < acer->wdev_expected) {
 		mutex_unlock(&acer_wmi_instances_lock);
 		return 0;
 	}
@@ -1114,27 +1263,17 @@ static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
 	err = acer_wmi_instance_setup(acer);
 	if (err) {
 		/*
-		 * This WMI device must remain unbound, but keep the instance
-		 * alive while already-bound siblings are still present. A later
-		 * probe can retry setup after completing the device set.
+		 * The aggregate cannot be set up. All WMI devices of a WMI bus
+		 * device are registered before any of them is probed, so a
+		 * later probe can never complete the set: the instance stays
+		 * inactive without publishing any interface and is only
+		 * released once its last WMI device is removed.
 		 */
+		dev_err(&wdev->dev, "Unable to set up the logical device: %d\n",
+			err);
 		acer->setup_failed = true;
-		list_del_init(&wdev_data->node);
-		acer->wdev_count--;
-		if (acer->wdevs[guid] == wdev) {
-			struct acer_wmi_wdev *replacement;
-
-			acer->wdevs[guid] = NULL;
-			list_for_each_entry(replacement, &acer->wdev_list,
-					    node) {
-				if (replacement->guid == guid) {
-					acer->wdevs[guid] = replacement->wdev;
-					break;
-				}
-			}
-		}
-		dev_set_drvdata(&wdev->dev, NULL);
-		goto out_maybe_destroy;
+		mutex_unlock(&acer_wmi_instances_lock);
+		return 0;
 	}
 
 	acer->setup_done = true;
@@ -1164,29 +1303,16 @@ static void acer_wmi_wdev_remove(struct wmi_device *wdev)
 	mutex_lock(&acer_wmi_instances_lock);
 
 	/*
-	 * Serialize with the notify path, which accesses the sibling WMI
-	 * devices through acer->wdevs[].
+	 * Take acer->lock to serialize the claim release with every path that
+	 * resolves an endpoint through acer->wdevs[], including the WMI
+	 * notify path and the subsystem frontends. The caller of this
+	 * function is synchronized with the notify path by the WMI core.
 	 */
-	mutex_lock(&acer->event_lock);
-	list_del_init(&wdev_data->node);
-	if (acer->wdevs[wdev_data->guid] == wdev) {
-		struct acer_wmi_wdev *replacement;
+	mutex_lock(&acer->lock);
+	acer_wmi_endpoint_release(acer, wdev_data->guid, wdev);
+	mutex_unlock(&acer->lock);
 
-		acer->wdevs[wdev_data->guid] = NULL;
-		list_for_each_entry(replacement, &acer->wdev_list, node) {
-			if (replacement->guid == wdev_data->guid) {
-				acer->wdevs[wdev_data->guid] =
-					replacement->wdev;
-				break;
-			}
-		}
-	}
-	mutex_unlock(&acer->event_lock);
-
-	if (acer->wdev_count)
-		acer->wdev_count--;
-
-	/* Free the instance once its last WMI device is gone. */
+	/* Free the instance once its last endpoint device is gone. */
 	if (!acer->wdev_count)
 		acer_wmi_instance_free(acer);
 
@@ -1221,12 +1347,20 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 	if (!acer->quirks)
 		return -ENODEV;
 
-	if (acer->wdevs[ACER_WMI_GUID_WMID_APGE])
+	mutex_lock(&acer->lock);
+	if (linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE))
 		acer->capability |= ACER_CAP_SET_FUNCTION_MODE;
+	mutex_unlock(&acer->lock);
 
 	set_quirks(acer);
 
-	if (acer->wdevs[ACER_WMI_GUID_WMID_APGE] &&
+	/*
+	 * Bring up the firmware side of the Acer interface before any
+	 * interface is published to the rest of the system.
+	 */
+	err = 0;
+	mutex_lock(&acer->lock);
+	if (linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE) &&
 	    (acer->capability & ACER_CAP_SET_FUNCTION_MODE)) {
 		if (linuwu_sense_gaming_enable_rf_button(acer))
 			pr_warn("Cannot enable RF Button Driver\n");
@@ -1234,15 +1368,19 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 		if (ec_raw_mode) {
 			if (linuwu_sense_gaming_enable_ec_raw(acer)) {
 				pr_err("Cannot enable EC raw mode\n");
-				return -ENODEV;
+				err = -ENODEV;
 			}
 		} else if (linuwu_sense_gaming_enable_launch_manager(acer)) {
 			pr_err("Cannot enable Launch Manager mode\n");
-			return -ENODEV;
+			err = -ENODEV;
 		}
 	} else if (ec_raw_mode) {
 		pr_info("No WMID EC raw mode enable method\n");
 	}
+	mutex_unlock(&acer->lock);
+
+	if (err)
+		return err;
 
 	/*
 	 * Keep a stable device name for the logical device of the only

@@ -80,9 +80,15 @@ int linuwu_sense_input_init(struct acer_wmi *acer)
 {
 	struct linuwu_sense_input *input;
 	struct input_dev *input_dev;
+	bool have_event;
 	int err;
 
-	if (!acer->wdevs[ACER_WMI_GUID_EVENT])
+	mutex_lock(&acer->lock);
+	have_event = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_EVENT) !=
+		     NULL;
+	mutex_unlock(&acer->lock);
+
+	if (!have_event)
 		return 0;
 
 	input = devm_kzalloc(acer->dev, sizeof(*input), GFP_KERNEL);

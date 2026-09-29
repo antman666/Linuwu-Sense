@@ -66,8 +66,14 @@ struct acer_wmi {
 	struct platform_device *pdev;
 	struct device *parent; /* the WMI bus device */
 	struct list_head node;
-	struct list_head wdev_list;
 
+	/*
+	 * The WMI device that claimed each Acer GUID of this instance. A GUID
+	 * is claimed by exactly one WMI device; the first device to bind wins
+	 * and further devices with the same GUID are refused. A NULL entry
+	 * means that the endpoint is currently not usable. Protected by
+	 * @lock.
+	 */
 	struct wmi_device *wdevs[ACER_WMI_GUID_COUNT];
 
 	/*
@@ -80,13 +86,21 @@ struct acer_wmi {
 	struct linuwu_sense_profile *profile;
 
 	/*
-	 * Number of WMI devices of this instance that are currently bound to
-	 * the driver, plus the instance setup state. All three fields are
-	 * protected by acer_wmi_instances_lock.
+	 * Number of distinct Acer GUIDs exposed by the WMI bus device this
+	 * instance belongs to. This is the number of endpoints that have to be
+	 * claimed before the instance can be set up. Captured when the
+	 * instance is created and protected by acer_wmi_instances_lock.
+	 */
+	unsigned int wdev_expected;
+
+	/*
+	 * Number of endpoints of this instance that are currently claimed,
+	 * plus the instance setup state. All three fields are protected by
+	 * acer_wmi_instances_lock, the claim itself additionally by @lock.
 	 */
 	unsigned int wdev_count;
 	bool setup_done;
-	/* Last setup attempt failed; cleared when a new WMI probe joins. */
+	/* Last setup attempt failed; the instance stays inactive. */
 	bool setup_failed;
 
 	/* The capabilities this interface provides */
@@ -114,5 +128,16 @@ struct acer_wmi {
 	int cpu_fan_speed;
 	int gpu_fan_speed;
 };
+
+/*
+ * Resolve the WMI device that claimed @guid for @acer. Returns NULL when the
+ * endpoint is not usable right now, either because the device never bound or
+ * because it was removed again.
+ *
+ * The caller must hold acer->lock for the whole resolve and use sequence, so
+ * that the returned device cannot be removed while it is in use.
+ */
+struct wmi_device *linuwu_sense_endpoint_get(struct acer_wmi *acer,
+					     enum acer_wmi_guid guid);
 
 #endif /* _LINUWU_SENSE_H_ */

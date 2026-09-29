@@ -91,7 +91,8 @@ struct linuwu_sense_keyboard {
 static int linuwu_sense_keyboard_get_backlight(
 	struct acer_wmi *acer, struct linuwu_sense_keyboard_backlight *state)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	struct get_four_zoned_kb_output out;
 	struct wmi_buffer input = {};
 	struct wmi_buffer output = {};
@@ -135,7 +136,8 @@ static int linuwu_sense_keyboard_set_backlight(
 	struct acer_wmi *acer,
 	const struct linuwu_sense_keyboard_backlight *state)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u8 gmInput[16] = {};
 	struct wmi_buffer input = {
 		.length = sizeof(gmInput),
@@ -178,7 +180,8 @@ static int linuwu_sense_keyboard_set_backlight(
 static int linuwu_sense_keyboard_get_zone_color(
 	struct acer_wmi *acer, enum linuwu_sense_keyboard_zone zone, u64 *color)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u64 value = acer_wmid_kb_zone_ids[zone];
 	u64 result = 0;
 	struct wmi_buffer input = {
@@ -214,7 +217,8 @@ err_log:
 static int linuwu_sense_keyboard_set_zone_color(
 	struct acer_wmi *acer, enum linuwu_sense_keyboard_zone zone, u64 color)
 {
-	struct wmi_device *wdev = acer->wdevs[ACER_WMI_GUID_WMID_GAMING];
+	struct wmi_device *wdev =
+		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	u64 value = (cpu_to_be64(color) >> 32) | acer_wmid_kb_zone_ids[zone];
 	struct wmi_buffer input = {
 		.length = sizeof(value),
