@@ -21,7 +21,7 @@
 /*
  * GUID3 device flags
  */
-#define ACER_WMID3_GDS_TOUCHPAD (1 << 1) /* Touchpad */
+#define ACER_WMID3_GDS_TOUCHPAD BIT(1) /* Touchpad */
 
 static const struct key_entry acer_wmi_keymap[] = {
 	{ KE_KEY, 0x01, { KEY_WLAN } }, /* WiFi */

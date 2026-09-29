@@ -6,8 +6,6 @@
  *  commands, shared by the gaming and battery feature backends.
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/kernel.h>
 #include <linux/slab.h>
 #include <linux/string.h>

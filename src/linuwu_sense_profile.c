@@ -8,8 +8,6 @@
  *  is derived from.
  */
 
-#define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/platform_profile.h>
@@ -29,14 +27,9 @@ struct linuwu_sense_profile {
 	enum platform_profile_option thermal_profile;
 };
 
-static struct linuwu_sense_profile *acer_profile(struct acer_wmi *acer)
-{
-	return acer->profile;
-}
-
 static int acer_power_source_refresh_locked(struct acer_wmi *acer)
 {
-	struct linuwu_sense_profile *profile = acer_profile(acer);
+	struct linuwu_sense_profile *profile = acer->profile;
 	bool on_ac;
 	int err;
 
@@ -146,7 +139,7 @@ static int
 acer_apply_thermal_profile_locked(struct acer_wmi *acer,
 				  enum platform_profile_option profile)
 {
-	struct linuwu_sense_profile *state = acer_profile(acer);
+	struct linuwu_sense_profile *state = acer->profile;
 	int err;
 
 	err = linuwu_sense_gaming_set_thermal_profile(acer, profile);
@@ -163,7 +156,7 @@ acer_predator_v4_platform_profile_get(struct device *dev,
 				      enum platform_profile_option *profile)
 {
 	struct acer_wmi *acer = dev_get_drvdata(dev);
-	struct linuwu_sense_profile *state = acer_profile(acer);
+	struct linuwu_sense_profile *state = acer->profile;
 	enum platform_profile_option tp;
 	int err;
 
@@ -186,7 +179,7 @@ acer_predator_v4_platform_profile_set(struct device *dev,
 				      enum platform_profile_option profile)
 {
 	struct acer_wmi *acer = dev_get_drvdata(dev);
-	struct linuwu_sense_profile *state = acer_profile(acer);
+	struct linuwu_sense_profile *state = acer->profile;
 	bool old_on_ac;
 	enum platform_profile_option tp;
 	int err;
@@ -233,7 +226,7 @@ static int acer_predator_v4_platform_profile_probe(void *drvdata,
 
 static int acer_thermal_profile_init(struct acer_wmi *acer)
 {
-	struct linuwu_sense_profile *state = acer_profile(acer);
+	struct linuwu_sense_profile *state = acer->profile;
 	enum platform_profile_option profile;
 	int err;
 
@@ -256,7 +249,7 @@ static const struct platform_profile_ops acer_predator_v4_platform_profile_ops =
 
 static void acer_platform_profile_setup(struct acer_wmi *acer)
 {
-	struct linuwu_sense_profile *state = acer_profile(acer);
+	struct linuwu_sense_profile *state = acer->profile;
 	struct device *profile_dev;
 	int err;
 
@@ -314,7 +307,7 @@ err_clear:
 
 int linuwu_sense_profile_cycle(struct acer_wmi *acer)
 {
-	struct linuwu_sense_profile *state = acer_profile(acer);
+	struct linuwu_sense_profile *state = acer->profile;
 	bool old_on_ac;
 	enum platform_profile_option next;
 	int err;
@@ -347,7 +340,7 @@ out:
 
 int linuwu_sense_profile_power_source_changed(struct acer_wmi *acer, bool on_ac)
 {
-	struct linuwu_sense_profile *state = acer_profile(acer);
+	struct linuwu_sense_profile *state = acer->profile;
 	bool old_on_ac;
 	enum platform_profile_option target;
 	int err = 0;

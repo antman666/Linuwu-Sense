@@ -437,8 +437,8 @@ static ssize_t four_zoned_rgb_kb_store(struct device *dev,
 
 	token = strsep(&input_ptr, ",");
 	if (!token || kstrtoint(token, 10, &direction) ||
-	    ((direction <= 0) && (mode == 0x3 || mode == 0x4)) ||
-	    direction < 0 || direction > 2) {
+	    (direction <= 0 && (mode == 0x3 || mode == 0x4)) || direction < 0 ||
+	    direction > 2) {
 		pr_err("Invalid direction value.\n");
 		return -EINVAL;
 	}
@@ -463,34 +463,34 @@ static ssize_t four_zoned_rgb_kb_store(struct device *dev,
 	}
 
 	switch (mode) {
-	case 0x0: // Static mode: Ignore speed and direction
+	case 0x0: /* Static mode: Ignore speed and direction */
 		speed = 0;
 		direction = 0;
 		break;
-	case 0x1: // Breathing mode: Ignore speed
+	case 0x1: /* Breathing mode: Ignore speed */
 		speed = 0;
 		direction = 0;
 		break;
-	case 0x2: // Neon mode: Ignore red, green, blue, and direction
+	case 0x2: /* Neon mode: Ignore red, green, blue, and direction */
 		red = 0;
 		green = 0;
 		blue = 0;
 		direction = 0;
 		break;
-	case 0x3: // Wave mode: Ignore red, green, and blue
+	case 0x3: /* Wave mode: Ignore red, green, and blue */
 		red = 0;
 		green = 0;
 		blue = 0;
 		break;
-	case 0x4: // Shifting mode: No restrictions (all values allowed)
+	case 0x4: /* Shifting mode: No restrictions (all values allowed) */
 		break;
-	case 0x5: // Zoom mode: Ignore direction
+	case 0x5: /* Zoom mode: Ignore direction */
 		direction = 0;
 		break;
-	case 0x6: // Meteor mode: Ignore direction
+	case 0x6: /* Meteor mode: Ignore direction */
 		direction = 0;
 		break;
-	case 0x7: // Twinkling mode: Ignore direction
+	case 0x7: /* Twinkling mode: Ignore direction */
 		direction = 0;
 		break;
 	default:
@@ -604,7 +604,7 @@ static int four_zone_kb_state_update(struct acer_wmi *acer)
 	struct kb_state state = kb->state;
 	int err;
 
-	// Get keyboard status
+	/* Get keyboard status */
 	err = linuwu_sense_keyboard_get_backlight(acer, &out);
 	if (err) {
 		pr_err("get kb status failed!");
@@ -619,7 +619,7 @@ static int four_zone_kb_state_update(struct acer_wmi *acer)
 	state.green = out.green;
 	state.blue = out.blue;
 
-	// Get per-zone color data
+	/* Get per-zone color data */
 	err = get_per_zone_color(acer, &state.zones);
 	if (err) {
 		pr_err("get_per_zone_color failed!");

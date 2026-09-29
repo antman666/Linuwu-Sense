@@ -87,9 +87,9 @@ static void set_quirks(struct acer_wmi *acer)
 		acer->capability |= ACER_CAP_TURBO_FAN;
 
 	/*
-	 * Some acer nitro laptops don't have features like lcd override , boot
-	 * animation sound so this is used. Think wisely before using any quirks
-	 * validate your features.
+	 * Not every Nitro model provides all of the newer features (LCD
+	 * override, boot animation sound, ...), so the capability set is
+	 * derived from the quirk entry of the matched model.
 	 */
 	if (quirks->nitro_sense == 1) {
 		acer->capability |= ACER_CAP_PLATFORM_PROFILE |
@@ -109,7 +109,7 @@ static void set_quirks(struct acer_wmi *acer)
 				    ACER_CAP_FAN_SPEED_READ |
 				    ACER_CAP_PREDATOR_SENSE;
 
-	/* Includes all feature that predatorv4 have*/
+	/* Same features as the Predator v4 models. */
 	if (quirks->nitro_v4)
 		acer->capability |= ACER_CAP_PLATFORM_PROFILE |
 				    ACER_CAP_FAN_SPEED_READ |
@@ -250,7 +250,7 @@ static ssize_t predator_usb_charging_show(struct device *dev,
 		&percent);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return sysfs_emit(buf, "%d\n", percent);
 }
@@ -265,7 +265,7 @@ static ssize_t predator_usb_charging_store(struct device *dev,
 
 	if (kstrtou8(buf, 10, &val))
 		return -EINVAL;
-	if ((val != 0) && (val != 10) && (val != 20) && (val != 30))
+	if (val != 0 && val != 10 && val != 20 && val != 30)
 		return -EINVAL;
 
 	mutex_lock(&acer->lock);
@@ -273,7 +273,7 @@ static ssize_t predator_usb_charging_store(struct device *dev,
 		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE), val);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return count;
 }
@@ -295,12 +295,12 @@ static ssize_t predator_battery_calibration_show(struct device *dev,
 		LINUWU_SENSE_BATTERY_MODE_CALIBRATION, &enabled);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return sysfs_emit(buf, "%d\n", enabled);
 }
 
-static ssize_t preadtor_battery_calibration_store(struct device *dev,
+static ssize_t predator_battery_calibration_store(struct device *dev,
 						  struct device_attribute *attr,
 						  const char *buf, size_t count)
 {
@@ -311,7 +311,7 @@ static ssize_t preadtor_battery_calibration_store(struct device *dev,
 	if (kstrtou8(buf, 10, &val))
 		return -EINVAL;
 
-	if ((val != 0) && (val != 1))
+	if (val != 0 && val != 1)
 		return -EINVAL;
 
 	mutex_lock(&acer->lock);
@@ -320,7 +320,7 @@ static ssize_t preadtor_battery_calibration_store(struct device *dev,
 		LINUWU_SENSE_BATTERY_MODE_CALIBRATION, val);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return count;
 }
@@ -414,7 +414,7 @@ static ssize_t predator_lcd_override_show(struct device *dev,
 	err = linuwu_sense_gaming_get_lcd_override(acer, &state);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return sysfs_emit(buf, "%d\n", state);
 }
@@ -429,14 +429,14 @@ static ssize_t predator_lcd_override_store(struct device *dev,
 
 	if (kstrtou8(buf, 10, &val))
 		return -EINVAL;
-	if ((val != 0) && (val != 1))
+	if (val != 0 && val != 1)
 		return -EINVAL;
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_gaming_set_lcd_override(acer, val == 1);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return count;
 }
@@ -457,7 +457,7 @@ static ssize_t predator_backlight_timeout_show(struct device *dev,
 	err = linuwu_sense_gaming_get_backlight_timeout(acer, &state);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return sysfs_emit(buf, "%d\n", state);
 }
@@ -472,14 +472,14 @@ static ssize_t predator_backlight_timeout_store(struct device *dev,
 
 	if (kstrtou8(buf, 10, &val))
 		return -EINVAL;
-	if ((val != 0) && (val != 1))
+	if (val != 0 && val != 1)
 		return -EINVAL;
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_gaming_set_backlight_timeout(acer, val == 1);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return count;
 }
@@ -499,7 +499,7 @@ static ssize_t predator_boot_animation_sound_show(struct device *dev,
 	err = linuwu_sense_gaming_get_boot_animation_sound(acer, &state);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return sysfs_emit(buf, "%d\n", state);
 }
@@ -515,14 +515,14 @@ predator_boot_animation_sound_store(struct device *dev,
 
 	if (kstrtou8(buf, 10, &val))
 		return -EINVAL;
-	if ((val != 0) && (val != 1))
+	if (val != 0 && val != 1)
 		return -EINVAL;
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_gaming_set_boot_animation_sound(acer, val == 1);
 	mutex_unlock(&acer->lock);
 	if (err)
-		return -ENODEV;
+		return err;
 
 	return count;
 }
@@ -541,7 +541,7 @@ static struct device_attribute usb_charging =
 	       predator_usb_charging_store);
 static struct device_attribute battery_calibration =
 	__ATTR(battery_calibration, 0644, predator_battery_calibration_show,
-	       preadtor_battery_calibration_store);
+	       predator_battery_calibration_store);
 static struct device_attribute turbo_mode = __ATTR(
 	turbo_mode, 0644, predator_turbo_mode_show, predator_turbo_mode_store);
 static struct device_attribute lcd_override =
@@ -568,7 +568,7 @@ static umode_t predator_sense_attr_is_visible(struct kobject *kobj,
 	return attr->mode;
 }
 
-static struct attribute_group preadtor_sense_attr_group = {
+static struct attribute_group predator_sense_attr_group = {
 	.name = "predator_sense",
 	.attrs = predator_sense_attrs,
 	.is_visible = predator_sense_attr_is_visible,
@@ -642,7 +642,7 @@ static int acer_platform_probe(struct platform_device *pdev)
 
 	if (has_cap(acer, ACER_CAP_PREDATOR_SENSE)) {
 		err = devm_device_add_group(&pdev->dev,
-					    &preadtor_sense_attr_group);
+					    &predator_sense_attr_group);
 		if (err)
 			return err;
 	}
