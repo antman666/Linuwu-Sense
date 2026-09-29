@@ -138,9 +138,6 @@ struct wmi_device *linuwu_sense_endpoint_get(struct acer_wmi *acer,
 }
 
 /* Fan Speed */
-static int acer_set_fan_speed(struct acer_wmi *acer, int t_cpu_fan_speed,
-			      int t_gpu_fan_speed);
-
 static bool acer_turbo_fan_supported(struct acer_wmi *acer)
 {
 	return has_cap(acer, ACER_CAP_TURBO_FAN) &&
@@ -373,192 +370,6 @@ static ssize_t preadtor_battery_calibration_store(struct device *dev,
 	return count;
 }
 
-/*
- * FAN CONTROLS
- */
-static int acer_set_fan_speed(struct acer_wmi *acer, int t_cpu_fan_speed,
-			      int t_gpu_fan_speed)
-{
-	struct wmi_device *wdev =
-		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
-	int err;
-
-	if (!wdev)
-		return -ENODEV;
-
-	if (t_cpu_fan_speed == 100 && t_gpu_fan_speed == 100) {
-		pr_info("MAX FAN MODE!\n");
-		err = linuwu_sense_fan_set_mode(wdev,
-						acer->quirks->cpu_fans > 0,
-						acer->quirks->gpu_fans > 0,
-						LINUWU_SENSE_FAN_MODE_TURBO);
-		if (err) {
-			pr_err("Error setting fan speed status: %d\n", err);
-			return err;
-		}
-	} else if (t_cpu_fan_speed == 0 && t_gpu_fan_speed == 0) {
-		pr_info("AUTO FAN MODE!\n");
-		err = linuwu_sense_fan_set_mode(wdev,
-						acer->quirks->cpu_fans > 0,
-						acer->quirks->gpu_fans > 0,
-						LINUWU_SENSE_FAN_MODE_AUTO);
-		if (err) {
-			pr_err("Error setting fan speed status: %d\n", err);
-			return err;
-		}
-	} else if (t_cpu_fan_speed <= 100 && t_gpu_fan_speed <= 100) {
-		if (t_cpu_fan_speed == 0) {
-			pr_info("CUSTOM FAN MODE (GPU)\n");
-			err = linuwu_sense_fan_set_mode(
-				wdev, acer->quirks->cpu_fans > 0, false,
-				LINUWU_SENSE_FAN_MODE_AUTO);
-			if (err) {
-				pr_err("Error setting fan speed status: %d\n",
-				       err);
-				return err;
-			}
-
-			err = linuwu_sense_fan_set_mode(
-				wdev, false, acer->quirks->gpu_fans > 0,
-				LINUWU_SENSE_FAN_MODE_CUSTOM);
-			if (err) {
-				pr_err("Error setting fan speed status: %d\n",
-				       err);
-				return err;
-			}
-
-			err = linuwu_sense_fan_set_speed(
-				wdev, LINUWU_SENSE_FAN_GPU, t_gpu_fan_speed);
-			if (err) {
-				pr_err("Error setting fan speed status: %d\n",
-				       err);
-				return err;
-			}
-		} else if (t_gpu_fan_speed == 0) {
-			pr_info("CUSTOM FAN MODE (CPU)\n");
-			err = linuwu_sense_fan_set_mode(
-				wdev, false, acer->quirks->gpu_fans > 0,
-				LINUWU_SENSE_FAN_MODE_AUTO);
-			if (err) {
-				pr_err("Error setting fan speed status: %d\n",
-				       err);
-				return err;
-			}
-
-			err = linuwu_sense_fan_set_mode(
-				wdev, acer->quirks->cpu_fans > 0, false,
-				LINUWU_SENSE_FAN_MODE_CUSTOM);
-			if (err) {
-				pr_err("Error setting fan speed status: %d\n",
-				       err);
-				return err;
-			}
-
-			err = linuwu_sense_fan_set_speed(
-				wdev, LINUWU_SENSE_FAN_CPU, t_cpu_fan_speed);
-			if (err) {
-				pr_err("Error setting fan speed status: %d\n",
-				       err);
-				return err;
-			}
-		} else {
-			pr_info("CUSTOM FAN MODE (MIXED)!\n");
-			err = linuwu_sense_fan_set_mode(
-				wdev, acer->quirks->cpu_fans > 0,
-				acer->quirks->gpu_fans > 0,
-				LINUWU_SENSE_FAN_MODE_CUSTOM);
-			if (err) {
-				pr_err("Error setting fan speed status: %d\n",
-				       err);
-				return err;
-			}
-
-			err = linuwu_sense_fan_set_speed(
-				wdev, LINUWU_SENSE_FAN_CPU, t_cpu_fan_speed);
-			if (err) {
-				pr_err("Error setting fan speed status: %d\n",
-				       err);
-				return err;
-			}
-
-			err = linuwu_sense_fan_set_speed(
-				wdev, LINUWU_SENSE_FAN_GPU, t_gpu_fan_speed);
-			if (err) {
-				pr_err("Error setting fan speed status: %d\n",
-				       err);
-				return err;
-			}
-		}
-	} else {
-		return -EIO;
-	}
-
-	acer->cpu_fan_speed = t_cpu_fan_speed;
-	acer->gpu_fan_speed = t_gpu_fan_speed;
-	pr_info("Fan speeds updated: CPU=%d, GPU=%d\n", acer->cpu_fan_speed,
-		acer->gpu_fan_speed);
-
-	return 0;
-}
-
-static ssize_t predator_fan_speed_show(struct device *dev,
-				       struct device_attribute *attr, char *buf)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	ssize_t ret;
-
-	mutex_lock(&acer->lock);
-	ret = sysfs_emit(buf, "%d,%d\n", acer->cpu_fan_speed,
-			 acer->gpu_fan_speed);
-	mutex_unlock(&acer->lock);
-
-	return ret;
-}
-
-static ssize_t predator_fan_speed_store(struct device *dev,
-					struct device_attribute *attr,
-					const char *buf, size_t count)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	int t_cpu_fan_speed, t_gpu_fan_speed;
-
-	char input[9];
-	char *token;
-	char *input_ptr = input;
-	ssize_t len;
-
-	len = strscpy(input, buf, sizeof(input));
-	if (len < 0)
-		return len;
-
-	if (len > 0 && input[len - 1] == '\n')
-		input[len - 1] = '\0';
-
-	token = strsep(&input_ptr, ",");
-	if (!token || kstrtoint(token, 10, &t_cpu_fan_speed) ||
-	    t_cpu_fan_speed < 0 || t_cpu_fan_speed > 100) {
-		pr_err("Invalid CPU speed value.\n");
-		return -EINVAL;
-	}
-
-	token = strsep(&input_ptr, ",");
-	if (!token || kstrtoint(token, 10, &t_gpu_fan_speed) ||
-	    t_gpu_fan_speed < 0 || t_gpu_fan_speed > 100) {
-		pr_err("Invalid GPU speed value.\n");
-		return -EINVAL;
-	}
-
-	int err;
-
-	mutex_lock(&acer->lock);
-	err = acer_set_fan_speed(acer, t_cpu_fan_speed, t_gpu_fan_speed);
-	mutex_unlock(&acer->lock);
-	if (err)
-		return -ENODEV;
-
-	return count;
-}
-
 static ssize_t predator_turbo_mode_show(struct device *dev,
 					struct device_attribute *attr,
 					char *buf)
@@ -779,22 +590,17 @@ static struct device_attribute battery_calibration =
 static struct device_attribute battery_limiter =
 	__ATTR(battery_limiter, 0644, predator_battery_limit_show,
 	       predator_battery_limit_store);
-static struct device_attribute fan_speed = __ATTR(
-	fan_speed, 0644, predator_fan_speed_show, predator_fan_speed_store);
 static struct device_attribute turbo_mode = __ATTR(
 	turbo_mode, 0644, predator_turbo_mode_show, predator_turbo_mode_store);
 static struct device_attribute lcd_override =
 	__ATTR(lcd_override, 0644, predator_lcd_override_show,
 	       predator_lcd_override_store);
-static struct attribute *predator_sense_attrs[] = { &lcd_override.attr,
-						    &fan_speed.attr,
-						    &turbo_mode.attr,
-						    &battery_limiter.attr,
-						    &battery_calibration.attr,
-						    &usb_charging.attr,
-						    &backlight_timeout.attr,
-						    &boot_animation_sound.attr,
-						    NULL };
+static struct attribute *predator_sense_attrs[] = {
+	&lcd_override.attr,	    &turbo_mode.attr,
+	&battery_limiter.attr,	    &battery_calibration.attr,
+	&usb_charging.attr,	    &backlight_timeout.attr,
+	&boot_animation_sound.attr, NULL
+};
 
 static umode_t predator_sense_attr_is_visible(struct kobject *kobj,
 					      struct attribute *attr, int n)
@@ -815,12 +621,13 @@ static struct attribute_group preadtor_sense_attr_group = {
 	.is_visible = predator_sense_attr_is_visible,
 };
 
-static struct attribute *nitro_sense_v4_attrs[] = {
-	&lcd_override.attr,	    &fan_speed.attr,
-	&battery_limiter.attr,	    &battery_calibration.attr,
-	&usb_charging.attr,	    &backlight_timeout.attr,
-	&boot_animation_sound.attr, NULL
-};
+static struct attribute *nitro_sense_v4_attrs[] = { &lcd_override.attr,
+						    &battery_limiter.attr,
+						    &battery_calibration.attr,
+						    &usb_charging.attr,
+						    &backlight_timeout.attr,
+						    &boot_animation_sound.attr,
+						    NULL };
 
 static struct attribute_group nitro_sense_v4_attr_group = {
 	.name = "nitro_sense",
@@ -829,8 +636,8 @@ static struct attribute_group nitro_sense_v4_attr_group = {
 
 /* nitro sense attributes */
 static struct attribute *nitro_sense_attrs[] = {
-	&fan_speed.attr,    &battery_limiter.attr,   &battery_calibration.attr,
-	&usb_charging.attr, &backlight_timeout.attr, NULL
+	&battery_limiter.attr, &battery_calibration.attr, &usb_charging.attr,
+	&backlight_timeout.attr, NULL
 };
 static struct attribute_group nitro_sense_attr_group = {
 	.name = "nitro_sense",
@@ -906,7 +713,12 @@ static int acer_platform_probe(struct platform_device *pdev)
 	if (err)
 		return err;
 
-	if (has_cap(acer, ACER_CAP_FAN_SPEED_READ)) {
+	/*
+	 * The hwmon frontend provides the sensor readings and the fan control:
+	 * register it when the machine has at least one of them.
+	 */
+	if (has_cap(acer, ACER_CAP_FAN_SPEED_READ) ||
+	    has_cap(acer, ACER_CAP_TURBO_FAN)) {
 		err = acer_wmi_hwmon_init(acer, acer->dev);
 		if (err)
 			return err;

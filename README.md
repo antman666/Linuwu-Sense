@@ -159,16 +159,29 @@ To change the state:
 
 #### **5. Fan Speed  🌬️**
 
-Controls the CPU and GPU fan speeds.
+Fan monitoring and fan control are provided through the Linux hwmon
+subsystem. The device is named `acer`, find it with:
 
-- **0** – Auto
-- **1** – Minimum fan speed (not recommended)
-- **100** – Maximum fan speed
-- Other values like **50, 55, 70** can be set according to your preference.
+`grep -l acer /sys/class/hwmon/*/name`
 
-Example (set CPU to 50 and GPU to 70):
+The channels are `fan1`/`pwm1` for the CPU fan and `fan2`/`pwm2` for the GPU
+fan, temperatures are `temp1` (CPU), `temp2` (GPU) and `temp3` (external):
 
-`echo 50,70 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/fan_speed`
+- **`fan[12]_input`** – current fan speed in RPM (read only).
+- **`temp[123]_input`** – current temperature in millidegrees (read only).
+- **`pwm[12]`** – fan duty cycle, 0-255. Writing a value switches the fan to
+  manual mode and applies the scaled duty cycle.
+- **`pwm[12]_enable`** – fan control mode: **0** = full speed, **1** = manual
+  (`pwmN`), **2** = automatic.
+
+Example (set the CPU fan to about 50% and the GPU fan to about 70%, assuming
+`hwmon3` is the `acer` device):
+
+`echo 1 | sudo tee /sys/class/hwmon/hwmon3/pwm1_enable`
+
+`echo 128 | sudo tee /sys/class/hwmon/hwmon3/pwm1`
+
+`echo 178 | sudo tee /sys/class/hwmon/hwmon3/pwm2`
 
 ---
 
