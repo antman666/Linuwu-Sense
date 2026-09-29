@@ -7,6 +7,7 @@
 
 #include <linux/types.h>
 
+struct acer_wmi;
 struct wmi_device;
 
 /*
@@ -35,5 +36,12 @@ int linuwu_sense_battery_set_mode(struct wmi_device *wdev,
 int linuwu_sense_battery_get_usb_charging(struct wmi_device *wdev,
 					  int *percent);
 int linuwu_sense_battery_set_usb_charging(struct wmi_device *wdev, u8 percent);
+
+/*
+ * Register the battery charge limit extension on the ACPI battery power
+ * supply. Must be called from the logical platform device probe without
+ * acer->lock held. Does nothing when the machine has no battery charge limit.
+ */
+int linuwu_sense_battery_init(struct acer_wmi *acer);
 
 #endif /* _LINUWU_SENSE_BATTERY_H_ */

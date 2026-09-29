@@ -125,18 +125,29 @@ To change the state:
 
 #### **3. Battery Limiter ⚡**
 
-Limits battery charging to 80%, preserving battery health for laptops primarily used while plugged into AC power.
+Limits battery charging to 80%, preserving battery health for laptops primarily used while plugged into AC power. The limit is exposed on the standard power_supply property of the ACPI battery, so it is also used by generic userspace tools like GNOME's or KDE's battery settings:
 
-- **1** – Enabled
-- **0** – Disabled
+`/sys/class/power_supply/BAT0/charge_control_end_threshold`
+
+The firmware only supports a fixed 80% limit, so written values are rounded to the nearest supported threshold:
+
+- **80** – limit charging to 80%
+- **100** – no limit (default)
+- Any value in between is rounded: values up to 90 enable the limit, values above disable it.
 
 To check the current status:
 
-`cat /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/battery_limiter`
+`cat /sys/class/power_supply/BAT0/charge_control_end_threshold`
 
-To change the state:
+To enable the limit:
 
-`echo 1 | sudo tee /sys/module/linuwu_sense/drivers/platform:linuwu-sense/linuwu-sense/predator_sense/battery_limiter`
+`echo 80 | sudo tee /sys/class/power_supply/BAT0/charge_control_end_threshold`
+
+To disable it:
+
+`echo 100 | sudo tee /sys/class/power_supply/BAT0/charge_control_end_threshold`
+
+Replace `BAT0` with the name of your battery if it is different.
 
 ---
 

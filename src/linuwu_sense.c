@@ -279,53 +279,8 @@ static ssize_t predator_usb_charging_store(struct device *dev,
 }
 
 /*
- * Battery Limit (80%)
  * Battery Calibration
  */
-static ssize_t predator_battery_limit_show(struct device *dev,
-					   struct device_attribute *attr,
-					   char *buf)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	int enabled;
-	int err;
-
-	mutex_lock(&acer->lock);
-	err = linuwu_sense_battery_get_mode(
-		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_BATTERY),
-		LINUWU_SENSE_BATTERY_MODE_HEALTH, &enabled);
-	mutex_unlock(&acer->lock);
-	if (err)
-		return -ENODEV;
-
-	return sysfs_emit(buf, "%d\n", enabled);
-}
-
-static ssize_t predator_battery_limit_store(struct device *dev,
-					    struct device_attribute *attr,
-					    const char *buf, size_t count)
-{
-	struct acer_wmi *acer = dev_get_drvdata(dev);
-	u8 val;
-	int err;
-
-	if (kstrtou8(buf, 10, &val))
-		return -EINVAL;
-
-	if ((val != 0) && (val != 1))
-		return -EINVAL;
-
-	mutex_lock(&acer->lock);
-	err = linuwu_sense_battery_set_mode(
-		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_BATTERY),
-		LINUWU_SENSE_BATTERY_MODE_HEALTH, val);
-	mutex_unlock(&acer->lock);
-	if (err)
-		return -ENODEV;
-
-	return count;
-}
-
 static ssize_t predator_battery_calibration_show(struct device *dev,
 						 struct device_attribute *attr,
 						 char *buf)
@@ -587,20 +542,18 @@ static struct device_attribute usb_charging =
 static struct device_attribute battery_calibration =
 	__ATTR(battery_calibration, 0644, predator_battery_calibration_show,
 	       preadtor_battery_calibration_store);
-static struct device_attribute battery_limiter =
-	__ATTR(battery_limiter, 0644, predator_battery_limit_show,
-	       predator_battery_limit_store);
 static struct device_attribute turbo_mode = __ATTR(
 	turbo_mode, 0644, predator_turbo_mode_show, predator_turbo_mode_store);
 static struct device_attribute lcd_override =
 	__ATTR(lcd_override, 0644, predator_lcd_override_show,
 	       predator_lcd_override_store);
-static struct attribute *predator_sense_attrs[] = {
-	&lcd_override.attr,	    &turbo_mode.attr,
-	&battery_limiter.attr,	    &battery_calibration.attr,
-	&usb_charging.attr,	    &backlight_timeout.attr,
-	&boot_animation_sound.attr, NULL
-};
+static struct attribute *predator_sense_attrs[] = { &lcd_override.attr,
+						    &turbo_mode.attr,
+						    &battery_calibration.attr,
+						    &usb_charging.attr,
+						    &backlight_timeout.attr,
+						    &boot_animation_sound.attr,
+						    NULL };
 
 static umode_t predator_sense_attr_is_visible(struct kobject *kobj,
 					      struct attribute *attr, int n)
@@ -621,13 +574,10 @@ static struct attribute_group preadtor_sense_attr_group = {
 	.is_visible = predator_sense_attr_is_visible,
 };
 
-static struct attribute *nitro_sense_v4_attrs[] = { &lcd_override.attr,
-						    &battery_limiter.attr,
-						    &battery_calibration.attr,
-						    &usb_charging.attr,
-						    &backlight_timeout.attr,
-						    &boot_animation_sound.attr,
-						    NULL };
+static struct attribute *nitro_sense_v4_attrs[] = {
+	&lcd_override.attr,	 &battery_calibration.attr,  &usb_charging.attr,
+	&backlight_timeout.attr, &boot_animation_sound.attr, NULL
+};
 
 static struct attribute_group nitro_sense_v4_attr_group = {
 	.name = "nitro_sense",
@@ -635,10 +585,10 @@ static struct attribute_group nitro_sense_v4_attr_group = {
 };
 
 /* nitro sense attributes */
-static struct attribute *nitro_sense_attrs[] = {
-	&battery_limiter.attr, &battery_calibration.attr, &usb_charging.attr,
-	&backlight_timeout.attr, NULL
-};
+static struct attribute *nitro_sense_attrs[] = { &battery_calibration.attr,
+						 &usb_charging.attr,
+						 &backlight_timeout.attr,
+						 NULL };
 static struct attribute_group nitro_sense_attr_group = {
 	.name = "nitro_sense",
 	.attrs = nitro_sense_attrs
@@ -710,6 +660,10 @@ static int acer_platform_probe(struct platform_device *pdev)
 	}
 
 	err = linuwu_sense_keyboard_init(acer);
+	if (err)
+		return err;
+
+	err = linuwu_sense_battery_init(acer);
 	if (err)
 		return err;
 
