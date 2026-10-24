@@ -15,6 +15,7 @@
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <acpi/battery.h>
+#include <linux/byteorder/generic.h>
 #include <linux/device.h>
 #include <linux/kernel.h>
 #include <linux/list.h>
@@ -54,9 +55,13 @@ struct set_battery_health_control_input {
 	u8 uReservedIn[5];
 } __packed;
 
+/*
+ * SetBatteryHealthControl returns two uint16 values. Only uReturn carries the
+ * method status, uReservedOut is reserved and has no documented meaning.
+ */
 struct set_battery_health_control_output {
-	u8 uReturn;
-	u8 uReservedOut;
+	__le16 uReturn;
+	__le16 uReservedOut;
 } __packed;
 
 int linuwu_sense_battery_get_usb_charging(struct wmi_device *wdev, int *percent)
@@ -201,8 +206,9 @@ int linuwu_sense_battery_set_mode(struct wmi_device *wdev,
 	}
 	memcpy(&ret, output.data, sizeof(ret));
 
-	if (ret.uReturn != 0 && ret.uReservedOut != 0) {
-		pr_err("Failed to set battery health status\n");
+	if (le16_to_cpu(ret.uReturn) != 0) {
+		pr_err("Failed to set battery health status: 0x%x\n",
+		       le16_to_cpu(ret.uReturn));
 		err = -EIO;
 		goto out;
 	}

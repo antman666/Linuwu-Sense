@@ -293,16 +293,12 @@ int linuwu_sense_profile_init(struct acer_wmi *acer)
 	if (acer->quirks->predator_v4) {
 		err = acer_thermal_profile_init(acer);
 		if (err)
-			goto err_clear;
+			return err;
 	}
 
 	acer_platform_profile_setup(acer);
 
 	return 0;
-
-err_clear:
-	acer->profile = NULL;
-	return err;
 }
 
 int linuwu_sense_profile_cycle(struct acer_wmi *acer)

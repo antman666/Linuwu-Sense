@@ -101,11 +101,12 @@ struct acer_wmi {
 	/*
 	 * Opaque state owned by the Linux subsystem frontends. The pointers
 	 * are published by the logical platform device probe before @ready is
-	 * set and released by its removal after @ready was cleared, so the WMI
-	 * event path may use them under @event_lock while the subsystem
-	 * frontends use them under @lock. The core driver only stores the
-	 * pointers, the component that allocated the state is responsible for
-	 * its content.
+	 * set and stay valid until every frontend was unregistered and its
+	 * state released: the last devres action of the platform device
+	 * clears them afterwards. This lets the WMI event path use them under
+	 * @event_lock while the subsystem frontends use them under @lock. The
+	 * core driver only stores the pointers, the component that allocated
+	 * the state is responsible for its content.
 	 */
 	struct linuwu_sense_input *input;
 	struct linuwu_sense_keyboard *keyboard;

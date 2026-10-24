@@ -599,6 +599,21 @@ static struct attribute_group nitro_sense_attr_group = {
  */
 
 /*
+ * Clear the shared frontend pointers. This action is registered before any
+ * frontend resource is allocated, so devres releases it last, after every
+ * frontend was unregistered and its state released. Until then a frontend
+ * callback may still dereference these pointers, so they must stay valid.
+ */
+static void acer_platform_frontends_released(void *data)
+{
+	struct acer_wmi *acer = data;
+
+	acer->input = NULL;
+	acer->keyboard = NULL;
+	acer->profile = NULL;
+}
+
+/*
  * Publish the userspace frontends of an instance. Called by the logical
  * platform device probe, which acer_wmi_instance_setup() triggers after the
  * endpoint topology was confirmed and the firmware side was initialized.
@@ -618,6 +633,11 @@ static int acer_platform_probe(struct platform_device *pdev)
 		return -ENODEV;
 
 	acer->platform_probe_ok = false;
+
+	err = devm_add_action_or_reset(&pdev->dev,
+				       acer_platform_frontends_released, acer);
+	if (err)
+		return err;
 
 	err = linuwu_sense_input_init(acer);
 	if (err) {
@@ -699,9 +719,10 @@ static void acer_platform_remove(struct platform_device *pdev)
 		return;
 
 	/*
-	 * Stop the WMI notify path before any resource is released. The
-	 * event_lock makes sure that no notify_new() callback is still
-	 * running when the devres-managed resources are torn down below.
+	 * Stop the WMI notify path. acer->ready only closes the event path;
+	 * the sysfs, LED and platform profile callbacks are stopped later by
+	 * their own devres release actions, so the frontend pointers must
+	 * stay valid until then.
 	 */
 	mutex_lock(&acer->event_lock);
 	acer->ready = false;
@@ -710,14 +731,14 @@ static void acer_platform_remove(struct platform_device *pdev)
 	linuwu_sense_keyboard_save_state(acer);
 
 	/*
-	 * All remaining resources (input, hwmon, platform profile and sysfs
-	 * groups) are devres-managed and are released by the driver core
-	 * after this callback returned. Drop the pointers so no subsystem
-	 * state can be used after it was released.
+	 * All remaining resources (input, hwmon, platform profile, LED
+	 * devices and sysfs groups) are devres-managed and stay live until
+	 * the driver core releases them after this callback returned. Their
+	 * callbacks may still dereference the state behind acer->input,
+	 * acer->keyboard and acer->profile, so the pointers must not be
+	 * cleared here. The devres action registered first in probe clears
+	 * them once every frontend has been unregistered.
 	 */
-	acer->input = NULL;
-	acer->keyboard = NULL;
-	acer->profile = NULL;
 }
 
 /*
@@ -1271,15 +1292,13 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 	if (!acer->platform_probe_ok) {
 		/*
 		 * The logical device probe failed and released its
-		 * devres-managed frontends again. Remove the unbound device so
-		 * that no incomplete interface stays behind.
+		 * devres-managed frontends again, including the action which
+		 * clears the shared frontend pointers. Remove the unbound
+		 * device so that no incomplete interface stays behind.
 		 */
 		platform_device_unregister(acer->pdev);
 		acer->pdev = NULL;
 		acer->dev = NULL;
-		acer->input = NULL;
-		acer->keyboard = NULL;
-		acer->profile = NULL;
 		return -ENODEV;
 	}
 

@@ -773,7 +773,7 @@ int linuwu_sense_keyboard_init(struct acer_wmi *acer)
 
 	err = devm_device_add_group(acer->dev, &four_zoned_kb_attr_group);
 	if (err)
-		goto err_clear;
+		return err;
 
 	/* Restore the persisted state, then sync the driver view with the EC. */
 	four_zone_kb_state_load(acer);
@@ -785,13 +785,9 @@ int linuwu_sense_keyboard_init(struct acer_wmi *acer)
 
 	err = acer_kb_leds_init(acer);
 	if (err)
-		goto err_clear;
+		return err;
 
 	return 0;
-
-err_clear:
-	acer->keyboard = NULL;
-	return err;
 }
 
 void linuwu_sense_keyboard_save_state(struct acer_wmi *acer)
