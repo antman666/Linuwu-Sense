@@ -1,5 +1,5 @@
 [Unit]
-Description=Unload linuwu_sense at shutdown
+Description=Optional: unload linuwu_sense at shutdown
 
 [Service]
 Type=oneshot

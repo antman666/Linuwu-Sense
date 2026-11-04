@@ -45,13 +45,61 @@ The sysfs controls are owned by root and writable by root only by default. If yo
 > ## Use at your own risk! This driver is independently developed through reverse engineering the official PredatorSense app, without any involvement from Acer. It interacts with low-level WMI methods, which may not be tested across all models.
 
 ## ✅ Supported devices
-Linuwu-Sense only targets Acer Predator/Nitro laptops. It is not a generic Acer driver: the module refuses to load unless the machine matches one of the exact DMI entries in the driver. There is no `force_*`, `predator_v4` or `nitro_v4` module parameter to bypass this check.
+Linuwu-Sense only targets Acer Predator/Nitro laptops. It is not a generic Acer driver: the module refuses to load unless the machine matches one of the listed DMI entries in the driver. There is no `force_*`, `predator_v4` or `nitro_v4` module parameter to bypass this check.
 
 **Predator:** PH315-53, PHN16-71, PHN16-72, PH16-71, PH18-71, PTX17-71
 
 **Nitro:** AN16-41, AN16-42, AN16-43, AN515-58, AN515-55, ANV16-41, ANV15-41, ANV15-51
 
 Only Predator PHN16-71 is fully supported. The other models are matched by the code, but the controls listed below are only available when the model supports them.
+
+## ⚙️ Feature configuration
+
+The DMI entry of the matched model is a hard capability boundary. The driver
+keeps the historical behaviour as the default set; `feature=` can only move
+features inside the boundary, and a runtime probe must confirm a newly enabled
+feature before it is used. Features that are off by default stay off until
+they are explicitly enabled:
+
+```text
+# /etc/modprobe.d/linuwu-sense.conf
+
+# disable a feature that is on by default
+options linuwu_sense feature=fan_control.enable=0
+
+# enable a feature that is off by default (probe must also succeed)
+options linuwu_sense feature=keyboard_4zone.enable=1 options=keyboard_4zone.firstzone=ff8800
+```
+
+The leading `options` is the modprobe.d directive; the `options=` after the
+module name is the driver parameter.
+
+- `feature=<feature>.enable=0|1` only accepts `enable`; anything else is
+  ignored with a warning.
+- `options=<feature>.<option>=<value>` carries feature specific values. It
+  never enables a feature; the feature must already be enabled.
+- A feature outside the DMI boundary is ignored with a warning and the model
+  default is kept.
+- `options` for a disabled feature is ignored with a warning.
+- Enabled features: `fan_tach`, `fan_control`, `thermal_profile`,
+  `keyboard_4zone`, `battery_health`, `usb_charging`,
+  `backlight_timeout`, `boot_animation`, `lcd_override`.
+- `keyboard_4zone` currently supports `firstzone` to `fourthzone` as
+  `RRGGBB` (or `0xRRGGBB`).
+
+The module no longer reads or writes any file. The static keyboard defaults
+come from `options=` at module load; runtime LED changes are not written back.
+
+`test_mode` is 0 by default and can be enabled at load time or at runtime:
+
+```bash
+sudo modprobe linuwu_sense test_mode=1
+echo 1 | sudo tee /sys/module/linuwu_sense/parameters/test_mode
+```
+
+It only raises driver detail logs from debug to info; it does not change the
+effective feature set. The detailed capability state is available read-only at
+`/sys/kernel/debug/linuwu_sense/capabilities`.
 
 ## 🛠️ Usage
 # Example Usage and Configuration
@@ -303,7 +351,13 @@ express. The format is unchanged and takes seven parameters:
     - `0`: Green (black for Neon)
     - `0`: Blue (black for Neon)
  
-The four-zone keyboard state is saved when the module is unloaded and restored on the next load (it is stored in `/etc/four_zone_kb_state`). The provided `linuwu_sense.service` unloads the module at shutdown, so the keyboard state survives a reboot. It is a userspace systemd unit and is not installed or enabled by the build system; install it yourself (copy it to `/etc/systemd/system/` and enable it) if you want this behavior.
+The module does not read or write any file, and it does not save runtime
+keyboard state. To restore a static zone colour layout at boot, put the values
+in `options=` in `/etc/modprobe.d/linuwu-sense.conf`; the driver applies them
+when the module loads. Runtime changes made through the LED class interface are
+not written back automatically. The `linuwu_sense.service` unit is therefore
+not required for persistence; it only unloads the module at shutdown if you
+choose to install it.
 
 ## GUI (third-party)
 The following projects are separate third-party frontends that talk to this module:
