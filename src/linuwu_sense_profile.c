@@ -266,8 +266,8 @@ static void acer_platform_profile_setup(struct acer_wmi *acer)
 		&acer_predator_v4_platform_profile_ops);
 	if (IS_ERR(profile_dev)) {
 		err = PTR_ERR(profile_dev);
-		dev_err(acer->dev, "Failed to register platform profile: %d\n",
-			err);
+		dev_warn(acer->dev,
+			 "platform profile registration failed: %d\n", err);
 		return;
 	}
 
@@ -280,8 +280,7 @@ int linuwu_sense_profile_init(struct acer_wmi *acer)
 	struct linuwu_sense_profile *state;
 	int err;
 
-	if (!acer->quirks->predator_v4 && !acer->quirks->nitro_sense &&
-	    !acer->quirks->nitro_v4)
+	if (!(acer->caps.effective & LS_FEAT_THERMAL_PROFILE))
 		return 0;
 
 	state = devm_kzalloc(acer->dev, sizeof(*state), GFP_KERNEL);
@@ -293,7 +292,9 @@ int linuwu_sense_profile_init(struct acer_wmi *acer)
 	if (acer->quirks->predator_v4) {
 		err = acer_thermal_profile_init(acer);
 		if (err)
-			return err;
+			dev_warn(acer->dev,
+				 "initial thermal profile setup failed: %d\n",
+				 err);
 	}
 
 	acer_platform_profile_setup(acer);

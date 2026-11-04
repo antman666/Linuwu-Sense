@@ -74,11 +74,11 @@ int linuwu_sense_battery_get_usb_charging(struct wmi_device *wdev, int *percent)
 
 	err = linuwu_sense_apge_get_function(wdev, 0x4, &result);
 	if (err) {
-		pr_err("Error getting usb charging status: %d\n", err);
+		linuwu_sense_pr_dbg("Error getting usb charging status: %d\n", err);
 		return err;
 	}
 
-	pr_info("usb charging get status: %llu\n", result);
+	linuwu_sense_pr_dbg("usb charging get status: %llu\n", result);
 	/* -1 means unknown value */
 	*percent = result == 663296  ? 0 :
 		   result == 659200  ? 10 :
@@ -97,7 +97,7 @@ int linuwu_sense_battery_set_usb_charging(struct wmi_device *wdev, u8 percent)
 	if (!wdev)
 		return -ENODEV;
 
-	pr_info("usb charging set value: %d\n", percent);
+	linuwu_sense_pr_dbg("usb charging set value: %d\n", percent);
 	/* If the value is unknown then turn it off */
 	input_value = percent == 0  ? 663300 :
 		      percent == 10 ? 659204 :
@@ -110,7 +110,7 @@ int linuwu_sense_battery_set_usb_charging(struct wmi_device *wdev, u8 percent)
 		return err;
 	}
 
-	pr_info("usb charging set status: %llu\n", result);
+	linuwu_sense_pr_dbg("usb charging set status: %llu\n", result);
 	return 0;
 }
 
@@ -131,7 +131,7 @@ int linuwu_sense_battery_get_mode(struct wmi_device *wdev,
 	struct wmi_buffer output = {};
 	int err;
 
-	pr_info("battery health query: %d\n", mode);
+	linuwu_sense_pr_dbg("battery health query: %d\n", mode);
 
 	if (!wdev)
 		return -ENODEV;
@@ -140,7 +140,7 @@ int linuwu_sense_battery_get_mode(struct wmi_device *wdev,
 		wdev, 0, ACER_WMID_GET_BATTERY_HEALTH_CONTROL_STATUS_METHODID,
 		&input, &output, sizeof(ret));
 	if (err) {
-		pr_err("Unexpected output getting battery health status: %d\n",
+		linuwu_sense_pr_dbg("Unexpected output getting battery health status: %d\n",
 		       err);
 		goto out;
 	}
@@ -186,7 +186,7 @@ int linuwu_sense_battery_set_mode(struct wmi_device *wdev,
 	struct wmi_buffer output = {};
 	int err;
 
-	pr_info("%s: %d | %d\n", __func__, mode, status);
+	linuwu_sense_pr_dbg("%s: %d | %d\n", __func__, mode, status);
 
 	if (!wdev)
 		return -ENODEV;
@@ -393,9 +393,7 @@ int linuwu_sense_battery_init(struct acer_wmi *acer)
 	struct linuwu_sense_battery_ext *battery;
 	int err;
 
-	if (!(acer->capability &
-	      (ACER_CAP_PREDATOR_SENSE | ACER_CAP_NITRO_SENSE |
-	       ACER_CAP_NITRO_SENSE_V4)))
+	if (!(acer->caps.effective & LS_FEAT_BATTERY_HEALTH))
 		return 0;
 
 	battery = devm_kzalloc(acer->dev, sizeof(*battery), GFP_KERNEL);

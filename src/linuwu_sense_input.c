@@ -129,7 +129,7 @@ void linuwu_sense_input_report_hotkey(struct acer_wmi *acer, u8 key_num,
 
 	key = sparse_keymap_entry_from_scancode(input->input_dev, key_num);
 	if (!key) {
-		pr_warn("Unknown key number - 0x%x\n", key_num);
+		linuwu_sense_pr_dbg("unknown hotkey 0x%x\n", key_num);
 		return;
 	}
 

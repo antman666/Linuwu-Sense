@@ -29,7 +29,6 @@
 #include "linuwu_sense_fan.h"
 #include "linuwu_sense_gaming.h"
 #include "linuwu_sense_hwmon.h"
-#include "linuwu_sense_quirks.h"
 
 struct acer_wmi_hwmon_data {
 	struct acer_wmi *acer;
@@ -54,9 +53,9 @@ static bool acer_wmi_hwmon_pwm_channel_visible(struct acer_wmi *acer,
 		return false;
 
 	if (channel == 0)
-		return acer->quirks->cpu_fans > 0;
+		return acer->cpu_fan_control;
 
-	return channel == 1 && acer->quirks->gpu_fans > 0;
+	return channel == 1 && acer->gpu_fan_control;
 }
 
 static umode_t acer_wmi_hwmon_is_visible(const void *data,
@@ -322,8 +321,12 @@ int acer_wmi_hwmon_init(struct acer_wmi *acer, struct device *dev)
 		ret = linuwu_sense_gaming_get_supported_sensors(
 			acer, &hwmon_data->supported_sensors);
 		mutex_unlock(&acer->lock);
-		if (ret < 0)
-			return ret;
+		if (ret < 0) {
+			dev_warn(dev,
+				 "sensor discovery failed (%d), no sensor readings\n",
+				 ret);
+			hwmon_data->supported_sensors = 0;
+		}
 	}
 
 	/* Nothing to expose when neither sensors nor fan control exist. */
