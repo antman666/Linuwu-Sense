@@ -319,6 +319,7 @@ static void ls_parse_feature_param(u32 default_on, u32 allowed)
 	u8 enable;
 
 	strscpy(buf, feature_param, sizeof(buf));
+	next = buf;
 
 	for (token = strsep(&next, ","); token; token = strsep(&next, ",")) {
 		token = strim(token);
@@ -383,6 +384,7 @@ static void ls_parse_options_param(u32 requested, u32 allowed)
 	int zone;
 
 	strscpy(buf, options_param, sizeof(buf));
+	next = buf;
 
 	for (token = strsep(&next, ","); token; token = strsep(&next, ",")) {
 		token = strim(token);
