@@ -65,8 +65,8 @@ static const struct linuwu_sense_quirks quirk_acer_predator_v4 = {
 
 /*
  * This quirk table only contains the supported Acer Predator/Nitro models.
- * Every entry matches the exact system vendor and product name, there is no
- * catch-all match for the Acer vendor.
+ * Every entry matches the Acer vendor and a product name substring; there is
+ * no catch-all match for the Acer vendor.
  */
 static const struct dmi_system_id acer_quirks[] = {
 	{

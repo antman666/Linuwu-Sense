@@ -11,14 +11,20 @@
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/bitops.h>
+#include <linux/debugfs.h>
 #include <linux/device.h>
+#include <linux/dmi.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
+#include <linux/kstrtox.h>
 #include <linux/module.h>
 #include <linux/mutex.h>
 #include <linux/platform_device.h>
+#include <linux/seq_file.h>
 #include <linux/slab.h>
 #include <linux/string.h>
+#include <linux/sysfs.h>
 #include <linux/types.h>
 #include <linux/wmi.h>
 
@@ -55,6 +61,48 @@ module_param(ec_raw_mode, bool, 0444);
 MODULE_PARM_DESC(ec_raw_mode, "Enable EC raw mode");
 
 /*
+ * Verbose logging is opt-in. It only raises the existing driver detail lines
+ * from dev_dbg() to dev_info(), it never changes the effective feature set.
+ */
+static bool linuwu_sense_test_mode;
+module_param_named(test_mode, linuwu_sense_test_mode, bool, 0644);
+MODULE_PARM_DESC(test_mode, "Enable verbose driver logging (default: 0)");
+
+void linuwu_sense_dbg(struct device *dev, const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+
+	if (linuwu_sense_test_mode)
+		dev_info(dev, "%pV", &vaf);
+	else
+		dev_dbg(dev, "%pV", &vaf);
+
+	va_end(args);
+}
+
+void linuwu_sense_pr_dbg(const char *fmt, ...)
+{
+	struct va_format vaf;
+	va_list args;
+
+	va_start(args, fmt);
+	vaf.fmt = fmt;
+	vaf.va = &args;
+
+	if (linuwu_sense_test_mode)
+		pr_info("%pV", &vaf);
+	else
+		pr_debug("%pV", &vaf);
+
+	va_end(args);
+}
+
+/*
  * Per WMI device state. Every matching WMI device that claimed its GUID gets
  * its own instance of this structure, bound to the WMI device via
  * dev_set_drvdata().
@@ -79,41 +127,399 @@ static bool acer_wmi_shutting_down;
  */
 static const struct linuwu_sense_quirks *acer_wmi_quirks;
 
+/*
+ * Static feature configuration. Both containers are load time only; the
+ * kernel never reads or writes a file for them.
+ */
+static char feature_param[512];
+static char options_param[512];
+static struct linuwu_sense_config linuwu_sense_config;
+static u32 linuwu_sense_default_on;
+static u32 linuwu_sense_allowed;
+
+struct linuwu_sense_feature_desc {
+	const char *name;
+	u32 bit;
+};
+
+static const struct linuwu_sense_feature_desc linuwu_sense_features[] = {
+	{ "fan_tach", LS_FEAT_FAN_TACH },
+	{ "fan_control", LS_FEAT_FAN_CONTROL },
+	{ "thermal_profile", LS_FEAT_THERMAL_PROFILE },
+	{ "keyboard_4zone", LS_FEAT_KEYBOARD_4ZONE },
+	{ "battery_health", LS_FEAT_BATTERY_HEALTH },
+	{ "usb_charging", LS_FEAT_USB_CHARGING },
+	{ "backlight_timeout", LS_FEAT_BACKLIGHT_TIMEOUT },
+	{ "boot_animation", LS_FEAT_BOOT_ANIMATION },
+	{ "lcd_override", LS_FEAT_LCD_OVERRIDE },
+};
+
+static const struct linuwu_sense_feature_desc *
+ls_feature_by_name(const char *name)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++)
+		if (!strcmp(name, linuwu_sense_features[i].name))
+			return &linuwu_sense_features[i];
+
+	return NULL;
+}
+
+static const struct linuwu_sense_feature_desc *
+ls_feature_by_bit(u32 bit)
+{
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++)
+		if (linuwu_sense_features[i].bit == bit)
+			return &linuwu_sense_features[i];
+
+	return NULL;
+}
+
+static int ls_feature_index(u32 bit)
+{
+	return __ffs(bit);
+}
+
+static int ls_param_store(char *dst, size_t size, const char *val,
+			  const char *name)
+{
+	size_t len;
+
+	if (!val) {
+		pr_warn("%s= without a value, using defaults\n", name);
+		dst[0] = '\0';
+		return 0;
+	}
+
+	len = strlen(val);
+	if (len >= size) {
+		pr_warn("%s= value truncated to %zu bytes\n", name, size - 1);
+		len = size - 1;
+	}
+
+	memcpy(dst, val, len);
+	dst[len] = '\0';
+
+	return 0;
+}
+
+static int feature_param_set(const char *val, const struct kernel_param *kp)
+{
+	return ls_param_store(feature_param, sizeof(feature_param), val,
+			      "feature");
+}
+
+static int feature_param_get(char *buffer, const struct kernel_param *kp)
+{
+	return sysfs_emit(buffer, "%s\n", feature_param);
+}
+
+static const struct kernel_param_ops feature_param_ops = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = feature_param_set,
+	.get = feature_param_get,
+};
+
+module_param_cb(feature, &feature_param_ops, NULL, 0444);
+MODULE_PARM_DESC(feature, "Feature switches: <feature>.enable=0|1,...");
+
+static int options_param_set(const char *val, const struct kernel_param *kp)
+{
+	return ls_param_store(options_param, sizeof(options_param), val,
+			      "options");
+}
+
+static int options_param_get(char *buffer, const struct kernel_param *kp)
+{
+	return sysfs_emit(buffer, "%s\n", options_param);
+}
+
+static const struct kernel_param_ops options_param_ops = {
+	.flags = KERNEL_PARAM_OPS_FL_NOARG,
+	.set = options_param_set,
+	.get = options_param_get,
+};
+
+module_param_cb(options, &options_param_ops, NULL, 0444);
+MODULE_PARM_DESC(options, "Feature options: <feature>.<option>=<value>,...");
+
+/*
+ * Features enabled by the historical behaviour of the matched model. This is
+ * the compatibility baseline: without feature= / options= nothing changes.
+ */
+static u32 linuwu_sense_default_features(const struct linuwu_sense_quirks *q)
+{
+	u32 features = 0;
+
+	if (q->cpu_fans || q->gpu_fans)
+		features |= LS_FEAT_FAN_CONTROL;
+
+	if (q->predator_v4 || q->nitro_v4 || q->nitro_sense)
+		features |= LS_FEAT_FAN_TACH;
+
+	if (q->predator_v4 || q->nitro_v4 || q->nitro_sense == 1)
+		features |= LS_FEAT_THERMAL_PROFILE;
+
+	if (q->four_zone_kb)
+		features |= LS_FEAT_KEYBOARD_4ZONE;
+
+	if (q->predator_v4 || q->nitro_v4 || q->nitro_sense)
+		features |= LS_FEAT_BATTERY_HEALTH |
+			    LS_FEAT_USB_CHARGING |
+			    LS_FEAT_BACKLIGHT_TIMEOUT;
+
+	if (q->predator_v4 || q->nitro_v4)
+		features |= LS_FEAT_BOOT_ANIMATION |
+			    LS_FEAT_LCD_OVERRIDE;
+
+	return features;
+}
+
+/*
+ * Hard boundary of the model. Features outside this mask cannot be enabled by
+ * the user and are never probed. The boundary is deliberately wider than the
+ * historical default so that a validated feature can be opted in without
+ * changing the default behaviour of existing machines.
+ */
+static u32 linuwu_sense_allowed_features(const struct linuwu_sense_quirks *q)
+{
+	u32 allowed = linuwu_sense_default_features(q);
+
+	allowed |= LS_FEAT_FAN_TACH | LS_FEAT_FAN_CONTROL |
+		   LS_FEAT_THERMAL_PROFILE | LS_FEAT_KEYBOARD_4ZONE |
+		   LS_FEAT_BATTERY_HEALTH | LS_FEAT_USB_CHARGING |
+		   LS_FEAT_BACKLIGHT_TIMEOUT;
+
+	if (q->predator_v4 || q->nitro_v4)
+		allowed |= LS_FEAT_BOOT_ANIMATION | LS_FEAT_LCD_OVERRIDE;
+
+	return allowed;
+}
+
+static int ls_parse_rgb(const char *value, u32 *rgb)
+{
+	u32 val;
+
+	if (kstrtou32(value, 16, &val) || val > 0xffffff)
+		return -EINVAL;
+
+	*rgb = val;
+	return 0;
+}
+
+static void ls_parse_feature_param(u32 default_on, u32 allowed)
+{
+	char buf[sizeof(feature_param)];
+	char *token, *next, *eq, *dot;
+	const struct linuwu_sense_feature_desc *feature;
+	u32 requested = default_on;
+	u8 enable;
+
+	strscpy(buf, feature_param, sizeof(buf));
+
+	for (token = strsep(&next, ","); token; token = strsep(&next, ",")) {
+		token = strim(token);
+		if (!*token)
+			continue;
+
+		eq = strchr(token, '=');
+		if (!eq) {
+			pr_warn("feature: '%s' has no value, ignored\n", token);
+			continue;
+		}
+		*eq++ = '\0';
+		token = strim(token);
+		eq = strim(eq);
+
+		dot = strrchr(token, '.');
+		if (!dot || strcmp(dot, ".enable")) {
+			pr_warn("feature: '%s' ignored, only <feature>.enable is accepted\n",
+				token);
+			continue;
+		}
+		*dot = '\0';
+
+		feature = ls_feature_by_name(token);
+		if (!feature) {
+			pr_warn("feature: unknown feature '%s', ignored\n", token);
+			continue;
+		}
+
+		if (!(allowed & feature->bit)) {
+			pr_warn("feature: '%s' is outside the model boundary, using default\n",
+				token);
+			continue;
+		}
+
+		if (kstrtou8(eq, 10, &enable) || enable > 1) {
+			pr_warn("feature: invalid enable value for '%s', using default\n",
+				token);
+			continue;
+		}
+
+		if (enable) {
+			requested |= feature->bit;
+			linuwu_sense_config.enabled |= feature->bit;
+			linuwu_sense_config.disabled &= ~feature->bit;
+		} else {
+			requested &= ~feature->bit;
+			linuwu_sense_config.disabled |= feature->bit;
+			linuwu_sense_config.enabled &= ~feature->bit;
+		}
+	}
+
+	linuwu_sense_config.requested = requested & allowed;
+}
+
+static void ls_parse_options_param(u32 requested, u32 allowed)
+{
+	char buf[sizeof(options_param)];
+	char *token, *next, *eq, *dot;
+	const struct linuwu_sense_feature_desc *feature;
+	u32 rgb;
+	int zone;
+
+	strscpy(buf, options_param, sizeof(buf));
+
+	for (token = strsep(&next, ","); token; token = strsep(&next, ",")) {
+		token = strim(token);
+		if (!*token)
+			continue;
+
+		eq = strchr(token, '=');
+		if (!eq) {
+			pr_warn("options: '%s' has no value, ignored\n", token);
+			continue;
+		}
+		*eq++ = '\0';
+		token = strim(token);
+		eq = strim(eq);
+
+		dot = strrchr(token, '.');
+		if (!dot) {
+			pr_warn("options: '%s' is not <feature>.<option>, ignored\n",
+				token);
+			continue;
+		}
+		*dot++ = '\0';
+
+		feature = ls_feature_by_name(token);
+		if (!feature) {
+			pr_warn("options: unknown feature '%s', ignored\n", token);
+			continue;
+		}
+
+		if (!(allowed & feature->bit)) {
+			pr_warn("options: '%s' is outside the model boundary, ignored\n",
+				token);
+			continue;
+		}
+
+		if (!strcmp(dot, "enable")) {
+			pr_warn("options: '%s.enable' belongs in feature=, ignored\n",
+				token);
+			continue;
+		}
+
+		if (!(requested & feature->bit)) {
+			pr_warn("options: '%s.%s' ignored, feature is disabled; use %s.enable=1\n",
+				token, dot, token);
+			continue;
+		}
+
+		if (feature->bit == LS_FEAT_KEYBOARD_4ZONE) {
+			if (!strcmp(dot, "firstzone"))
+				zone = 0;
+			else if (!strcmp(dot, "secondzone"))
+				zone = 1;
+			else if (!strcmp(dot, "thirdzone"))
+				zone = 2;
+			else if (!strcmp(dot, "fourthzone"))
+				zone = 3;
+			else {
+				pr_warn("options: unknown keyboard_4zone option '%s', ignored\n",
+					dot);
+				continue;
+			}
+
+			if (ls_parse_rgb(eq, &rgb)) {
+				pr_warn("options: invalid colour for keyboard_4zone.%s, ignored\n",
+					dot);
+				continue;
+			}
+
+			linuwu_sense_config.keyboard.valid[zone] = true;
+			linuwu_sense_config.keyboard.rgb[zone] = rgb;
+			continue;
+		}
+
+		pr_warn("options: unknown option '%s' for feature '%s', ignored\n",
+			dot, token);
+	}
+}
+
+static int linuwu_sense_config_init(const struct linuwu_sense_quirks *quirks)
+{
+	memset(&linuwu_sense_config, 0, sizeof(linuwu_sense_config));
+
+	linuwu_sense_default_on = linuwu_sense_default_features(quirks);
+	linuwu_sense_allowed = linuwu_sense_allowed_features(quirks);
+
+	if (linuwu_sense_default_on & ~linuwu_sense_allowed) {
+		pr_warn("model table error: default features exceed the boundary, clamping\n");
+		linuwu_sense_default_on &= linuwu_sense_allowed;
+	}
+
+	linuwu_sense_config.requested = linuwu_sense_default_on;
+
+	ls_parse_feature_param(linuwu_sense_default_on, linuwu_sense_allowed);
+	ls_parse_options_param(linuwu_sense_config.requested,
+			       linuwu_sense_allowed);
+
+	return 0;
+}
+
+/*
+ * Family bits select the userspace frontend group and are not switchable.
+ * The individual controls are derived from caps.effective by
+ * ls_update_capability().
+ */
 static void set_quirks(struct acer_wmi *acer)
 {
 	const struct linuwu_sense_quirks *quirks = acer->quirks;
 
-	if (quirks->cpu_fans || quirks->gpu_fans)
-		acer->capability |= ACER_CAP_TURBO_FAN;
-
-	/*
-	 * Not every Nitro model provides all of the newer features (LCD
-	 * override, boot animation sound, ...), so the capability set is
-	 * derived from the quirk entry of the matched model.
-	 */
-	if (quirks->nitro_sense == 1) {
-		acer->capability |= ACER_CAP_PLATFORM_PROFILE |
-				    ACER_CAP_FAN_SPEED_READ |
-				    ACER_CAP_NITRO_SENSE;
-	} else if (quirks->nitro_sense == 2) {
-		/*
-		 * Platform Profile is not found on some older acer nitro
-		 * models, so we exclude it
-		 */
-		acer->capability |= ACER_CAP_FAN_SPEED_READ |
-				    ACER_CAP_NITRO_SENSE;
-	}
-
+	if (quirks->nitro_sense)
+		acer->capability |= ACER_CAP_NITRO_SENSE;
 	if (quirks->predator_v4)
-		acer->capability |= ACER_CAP_PLATFORM_PROFILE |
-				    ACER_CAP_FAN_SPEED_READ |
-				    ACER_CAP_PREDATOR_SENSE;
-
-	/* Same features as the Predator v4 models. */
+		acer->capability |= ACER_CAP_PREDATOR_SENSE;
 	if (quirks->nitro_v4)
-		acer->capability |= ACER_CAP_PLATFORM_PROFILE |
-				    ACER_CAP_FAN_SPEED_READ |
-				    ACER_CAP_NITRO_SENSE_V4;
+		acer->capability |= ACER_CAP_NITRO_SENSE_V4;
+
+	acer->cpu_fan_control = quirks->cpu_fans > 0;
+	acer->gpu_fan_control = quirks->gpu_fans > 0;
+}
+
+static void ls_update_capability(struct acer_wmi *acer)
+{
+	acer->capability &= ~(ACER_CAP_TURBO_FAN |
+			      ACER_CAP_PLATFORM_PROFILE |
+			      ACER_CAP_FAN_SPEED_READ);
+
+	if (acer->caps.effective & LS_FEAT_FAN_CONTROL)
+		acer->capability |= ACER_CAP_TURBO_FAN;
+	if (acer->caps.effective & LS_FEAT_THERMAL_PROFILE)
+		acer->capability |= ACER_CAP_PLATFORM_PROFILE;
+	if (acer->caps.effective & LS_FEAT_FAN_TACH)
+		acer->capability |= ACER_CAP_FAN_SPEED_READ;
+}
+
+static void ls_clear_feature(struct acer_wmi *acer, u32 feature)
+{
+	acer->caps.effective &= ~feature;
+	ls_update_capability(acer);
 }
 
 /*
@@ -123,6 +529,11 @@ static void set_quirks(struct acer_wmi *acer)
 static bool has_cap(const struct acer_wmi *acer, u32 cap)
 {
 	return acer->capability & cap;
+}
+
+static bool has_feature(const struct acer_wmi *acer, u32 feature)
+{
+	return acer->caps.effective & feature;
 }
 
 /*
@@ -137,11 +548,240 @@ struct wmi_device *linuwu_sense_endpoint_get(struct acer_wmi *acer,
 	return acer->wdevs[guid];
 }
 
+/*
+ * Capability probe. Only features the user explicitly enabled outside the
+ * historical default are probed; the defaults keep their current behaviour.
+ */
+static void ls_probe_record(struct acer_wmi *acer, u32 bit, int err)
+{
+	const struct linuwu_sense_feature_desc *feature = ls_feature_by_bit(bit);
+	int index = ls_feature_index(bit);
+
+	if (!feature || index < 0 || index >= LS_FEAT_COUNT)
+		return;
+
+	acer->caps.last_err[index] = err;
+
+	if (!err) {
+		acer->caps.state[index] = LS_PROBE_SUPPORTED;
+		linuwu_sense_dbg(acer->parent, "feature %s: probe supported\n",
+				 feature->name);
+		return;
+	}
+
+	if (err == -ENODEV)
+		acer->caps.state[index] = LS_PROBE_DEFERRED;
+	else if (err == -EOPNOTSUPP)
+		acer->caps.state[index] = LS_PROBE_UNSUPPORTED;
+	else
+		acer->caps.state[index] = LS_PROBE_INCONCLUSIVE;
+
+	acer->caps.effective &= ~bit;
+	dev_warn(acer->parent, "feature %s: probe failed (%d), disabled\n",
+		 feature->name, err);
+}
+
+static int ls_probe_fan_tach(struct acer_wmi *acer)
+{
+	u64 sensors;
+	int err;
+
+	mutex_lock(&acer->lock);
+	err = linuwu_sense_gaming_get_supported_sensors(acer, &sensors);
+	mutex_unlock(&acer->lock);
+	if (err)
+		return err;
+
+	acer->caps.sensors = sensors;
+
+	if (!linuwu_sense_gaming_sensor_is_supported(
+		    sensors, LINUWU_SENSE_GAMING_SENSOR_CPU_FAN_SPEED) &&
+	    !linuwu_sense_gaming_sensor_is_supported(
+		    sensors, LINUWU_SENSE_GAMING_SENSOR_GPU_FAN_SPEED))
+		return -EOPNOTSUPP;
+
+	return 0;
+}
+
+static int ls_probe_fan_control(struct acer_wmi *acer)
+{
+	enum linuwu_sense_fan_mode mode;
+	struct wmi_device *wdev;
+	bool cpu = false;
+	bool gpu = false;
+	int err;
+
+	mutex_lock(&acer->lock);
+	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
+	if (!wdev) {
+		err = -ENODEV;
+		goto out_unlock;
+	}
+
+	if (!linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_CPU, &mode))
+		cpu = true;
+	if (!linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_GPU, &mode))
+		gpu = true;
+
+	err = (cpu || gpu) ? 0 : -EOPNOTSUPP;
+
+out_unlock:
+	mutex_unlock(&acer->lock);
+
+	acer->cpu_fan_control |= cpu;
+	acer->gpu_fan_control |= gpu;
+
+	return err;
+}
+
+static int ls_probe_thermal_profile(struct acer_wmi *acer)
+{
+	unsigned long profiles = 0;
+	int err;
+
+	mutex_lock(&acer->lock);
+	err = linuwu_sense_gaming_get_supported_thermal_profiles(acer,
+								 &profiles);
+	mutex_unlock(&acer->lock);
+
+	if (!err && !profiles)
+		err = -EOPNOTSUPP;
+
+	acer->caps.profiles = profiles;
+	return err;
+}
+
+static int ls_probe_battery_health(struct acer_wmi *acer)
+{
+	struct wmi_device *wdev;
+	int enabled;
+	int err;
+
+	mutex_lock(&acer->lock);
+	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_BATTERY);
+	if (wdev)
+		err = linuwu_sense_battery_get_mode(
+			wdev, LINUWU_SENSE_BATTERY_MODE_HEALTH, &enabled);
+	else
+		err = -ENODEV;
+	mutex_unlock(&acer->lock);
+
+	return err;
+}
+
+static int ls_probe_usb_charging(struct acer_wmi *acer)
+{
+	struct wmi_device *wdev;
+	int percent;
+	int err;
+
+	mutex_lock(&acer->lock);
+	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE);
+	if (wdev)
+		err = linuwu_sense_battery_get_usb_charging(wdev, &percent);
+	else
+		err = -ENODEV;
+	mutex_unlock(&acer->lock);
+
+	if (!err && percent < 0)
+		err = -EOPNOTSUPP;
+
+	return err;
+}
+
+static int ls_probe_backlight_timeout(struct acer_wmi *acer)
+{
+	int state;
+	int err;
+
+	mutex_lock(&acer->lock);
+	err = linuwu_sense_gaming_get_backlight_timeout(acer, &state);
+	mutex_unlock(&acer->lock);
+
+	if (!err && state < 0)
+		err = -EOPNOTSUPP;
+
+	return err;
+}
+
+static int ls_probe_boot_animation(struct acer_wmi *acer)
+{
+	int state;
+	int err;
+
+	mutex_lock(&acer->lock);
+	err = linuwu_sense_gaming_get_boot_animation_sound(acer, &state);
+	mutex_unlock(&acer->lock);
+
+	if (!err && state < 0)
+		err = -EOPNOTSUPP;
+
+	return err;
+}
+
+static int ls_probe_lcd_override(struct acer_wmi *acer)
+{
+	int state;
+	int err;
+
+	mutex_lock(&acer->lock);
+	err = linuwu_sense_gaming_get_lcd_override(acer, &state);
+	mutex_unlock(&acer->lock);
+
+	if (!err && state < 0)
+		err = -EOPNOTSUPP;
+
+	return err;
+}
+
+static void acer_wmi_caps_probe(struct acer_wmi *acer)
+{
+	u32 want = acer->caps.requested & ~acer->caps.default_on;
+	unsigned int i;
+
+	for (i = 0; i < LS_FEAT_COUNT; i++) {
+		acer->caps.state[i] = LS_PROBE_NOT_PROBED;
+		acer->caps.last_err[i] = 0;
+	}
+
+	acer->caps.effective = acer->caps.requested;
+
+	if (want & LS_FEAT_FAN_TACH)
+		ls_probe_record(acer, LS_FEAT_FAN_TACH,
+				ls_probe_fan_tach(acer));
+	if (want & LS_FEAT_FAN_CONTROL)
+		ls_probe_record(acer, LS_FEAT_FAN_CONTROL,
+				ls_probe_fan_control(acer));
+	if (want & LS_FEAT_THERMAL_PROFILE)
+		ls_probe_record(acer, LS_FEAT_THERMAL_PROFILE,
+				ls_probe_thermal_profile(acer));
+	if (want & LS_FEAT_KEYBOARD_4ZONE)
+		ls_probe_record(acer, LS_FEAT_KEYBOARD_4ZONE,
+				linuwu_sense_keyboard_probe(acer));
+	if (want & LS_FEAT_BATTERY_HEALTH)
+		ls_probe_record(acer, LS_FEAT_BATTERY_HEALTH,
+				ls_probe_battery_health(acer));
+	if (want & LS_FEAT_USB_CHARGING)
+		ls_probe_record(acer, LS_FEAT_USB_CHARGING,
+				ls_probe_usb_charging(acer));
+	if (want & LS_FEAT_BACKLIGHT_TIMEOUT)
+		ls_probe_record(acer, LS_FEAT_BACKLIGHT_TIMEOUT,
+				ls_probe_backlight_timeout(acer));
+	if (want & LS_FEAT_BOOT_ANIMATION)
+		ls_probe_record(acer, LS_FEAT_BOOT_ANIMATION,
+				ls_probe_boot_animation(acer));
+	if (want & LS_FEAT_LCD_OVERRIDE)
+		ls_probe_record(acer, LS_FEAT_LCD_OVERRIDE,
+				ls_probe_lcd_override(acer));
+
+	ls_update_capability(acer);
+}
+
 /* Fan Speed */
 static bool acer_turbo_fan_supported(struct acer_wmi *acer)
 {
 	return has_cap(acer, ACER_CAP_TURBO_FAN) &&
-	       (acer->quirks->cpu_fans > 0 || acer->quirks->gpu_fans > 0);
+	       (acer->cpu_fan_control || acer->gpu_fan_control);
 }
 
 static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
@@ -155,8 +795,8 @@ static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
 	if (!wdev)
 		return -ENODEV;
 
-	err = linuwu_sense_fan_set_mode(wdev, acer->quirks->cpu_fans > 0,
-					acer->quirks->gpu_fans > 0,
+	err = linuwu_sense_fan_set_mode(wdev, acer->cpu_fan_control,
+					acer->gpu_fan_control,
 					turbo ? LINUWU_SENSE_FAN_MODE_TURBO :
 						LINUWU_SENSE_FAN_MODE_AUTO);
 	if (err)
@@ -182,7 +822,8 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 
 	err = linuwu_sense_event_parse(data, &event);
 	if (err) {
-		pr_warn("Unknown buffer length %zu\n", data->length);
+		linuwu_sense_dbg(&wdev->dev, "unknown event buffer length %zu\n",
+				 data->length);
 		return;
 	}
 
@@ -194,7 +835,8 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 
 	switch (event.type) {
 	case LINUWU_SENSE_EVENT_HOTKEY:
-		pr_info("device state: 0x%x\n", event.device_state);
+		linuwu_sense_dbg(&wdev->dev, "hotkey %u, device state 0x%x\n",
+				 event.key_num, event.device_state);
 		linuwu_sense_input_report_hotkey(acer, event.key_num,
 						 event.device_state);
 		break;
@@ -211,9 +853,7 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 	case LINUWU_SENSE_EVENT_BATTERY_BOOST:
 		break;
 	case LINUWU_SENSE_EVENT_CALIBRATION:
-		if (has_cap(acer, ACER_CAP_PREDATOR_SENSE) ||
-		    has_cap(acer, ACER_CAP_NITRO_SENSE) ||
-		    has_cap(acer, ACER_CAP_NITRO_SENSE_V4)) {
+		if (has_feature(acer, LS_FEAT_BATTERY_HEALTH)) {
 			mutex_lock(&acer->lock);
 			err = linuwu_sense_battery_set_mode(
 				linuwu_sense_endpoint_get(
@@ -222,11 +862,14 @@ static void acer_wmi_notify(struct wmi_device *wdev,
 				event.enabled);
 			mutex_unlock(&acer->lock);
 			if (err)
-				pr_err("Error changing calibration state\n");
+				dev_err(&wdev->dev,
+					"error changing calibration state: %d\n",
+					err);
 		}
 		break;
 	default:
-		pr_warn("Unknown event\n");
+		linuwu_sense_dbg(&wdev->dev, "unknown event type %d\n",
+				 event.type);
 		break;
 	}
 
@@ -346,7 +989,7 @@ static ssize_t predator_turbo_mode_show(struct device *dev,
 		goto out;
 	}
 
-	if (acer->quirks->cpu_fans > 0) {
+	if (acer->cpu_fan_control) {
 		err = linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_CPU,
 						&mode);
 		if (err)
@@ -356,7 +999,7 @@ static ssize_t predator_turbo_mode_show(struct device *dev,
 			enabled = false;
 	}
 
-	if (acer->quirks->gpu_fans > 0) {
+	if (acer->gpu_fan_control) {
 		err = linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_GPU,
 						&mode);
 		if (err)
@@ -555,17 +1198,42 @@ static struct attribute *predator_sense_attrs[] = { &lcd_override.attr,
 						    &boot_animation_sound.attr,
 						    NULL };
 
+static umode_t ls_sense_attr_is_visible(struct acer_wmi *acer,
+					struct attribute *attr)
+{
+	if (!acer)
+		return 0;
+
+	if (attr == &turbo_mode.attr)
+		return acer_turbo_fan_supported(acer) ? attr->mode : 0;
+	if (attr == &lcd_override.attr)
+		return has_feature(acer, LS_FEAT_LCD_OVERRIDE) ? attr->mode : 0;
+	if (attr == &battery_calibration.attr)
+		return has_feature(acer, LS_FEAT_BATTERY_HEALTH) ? attr->mode : 0;
+	if (attr == &usb_charging.attr)
+		return has_feature(acer, LS_FEAT_USB_CHARGING) ? attr->mode : 0;
+	if (attr == &backlight_timeout.attr)
+		return has_feature(acer, LS_FEAT_BACKLIGHT_TIMEOUT) ? attr->mode : 0;
+	if (attr == &boot_animation_sound.attr)
+		return has_feature(acer, LS_FEAT_BOOT_ANIMATION) ? attr->mode : 0;
+
+	return attr->mode;
+}
+
 static umode_t predator_sense_attr_is_visible(struct kobject *kobj,
 					      struct attribute *attr, int n)
 {
 	struct device *dev = kobj_to_dev(kobj);
-	struct acer_wmi *acer = dev_get_drvdata(dev);
 
-	if (attr == &turbo_mode.attr &&
-	    (!acer || !acer_turbo_fan_supported(acer)))
-		return 0;
+	return ls_sense_attr_is_visible(dev_get_drvdata(dev), attr);
+}
 
-	return attr->mode;
+static umode_t nitro_sense_attr_is_visible(struct kobject *kobj,
+					   struct attribute *attr, int n)
+{
+	struct device *dev = kobj_to_dev(kobj);
+
+	return ls_sense_attr_is_visible(dev_get_drvdata(dev), attr);
 }
 
 static struct attribute_group predator_sense_attr_group = {
@@ -581,7 +1249,8 @@ static struct attribute *nitro_sense_v4_attrs[] = {
 
 static struct attribute_group nitro_sense_v4_attr_group = {
 	.name = "nitro_sense",
-	.attrs = nitro_sense_v4_attrs
+	.attrs = nitro_sense_v4_attrs,
+	.is_visible = nitro_sense_attr_is_visible,
 };
 
 /* nitro sense attributes */
@@ -591,7 +1260,8 @@ static struct attribute *nitro_sense_attrs[] = { &battery_calibration.attr,
 						 NULL };
 static struct attribute_group nitro_sense_attr_group = {
 	.name = "nitro_sense",
-	.attrs = nitro_sense_attrs
+	.attrs = nitro_sense_attrs,
+	.is_visible = nitro_sense_attr_is_visible,
 };
 
 /*
@@ -617,10 +1287,10 @@ static void acer_platform_frontends_released(void *data)
  * Publish the userspace frontends of an instance. Called by the logical
  * platform device probe, which acer_wmi_instance_setup() triggers after the
  * endpoint topology was confirmed and the firmware side was initialized.
- * A failure makes this probe fail and the setup path removes the logical
- * device again, so no partial interface stays behind. The platform profile
- * frontend is the only best effort one: when its registration fails, the
- * machine simply runs without profile support.
+ *
+ * Optional frontends are best effort: a failure is logged and the matching
+ * feature is cleared, but it never makes the whole aggregate unusable. Only
+ * the devres setup itself is fatal.
  *
  * Event handling (@ready) is enabled last, once every frontend is published.
  */
@@ -640,15 +1310,16 @@ static int acer_platform_probe(struct platform_device *pdev)
 		return err;
 
 	err = linuwu_sense_input_init(acer);
-	if (err) {
-		pr_err("Unable to set up input device\n");
-		return err;
-	}
+	if (err)
+		dev_warn(&pdev->dev, "input frontend disabled: %d\n", err);
 
-	if (has_cap(acer, ACER_CAP_PLATFORM_PROFILE)) {
+	if (has_feature(acer, LS_FEAT_THERMAL_PROFILE)) {
 		err = linuwu_sense_profile_init(acer);
-		if (err)
-			return err;
+		if (err) {
+			dev_warn(&pdev->dev,
+				 "platform profile frontend disabled: %d\n", err);
+			ls_clear_feature(acer, LS_FEAT_THERMAL_PROFILE);
+		}
 	}
 
 	if (has_cap(acer, ACER_CAP_TURBO_FAN)) {
@@ -656,36 +1327,49 @@ static int acer_platform_probe(struct platform_device *pdev)
 		err = acer_set_turbo_fan_mode_locked(acer, false);
 		mutex_unlock(&acer->lock);
 		if (err && err != -EOPNOTSUPP)
-			pr_warn("Unable to initialize gaming fan mode: %d\n",
-				err);
+			dev_warn(&pdev->dev,
+				 "unable to initialize fan mode: %d\n", err);
 	}
 
 	if (has_cap(acer, ACER_CAP_PREDATOR_SENSE)) {
 		err = devm_device_add_group(&pdev->dev,
 					    &predator_sense_attr_group);
 		if (err)
-			return err;
+			dev_warn(&pdev->dev,
+				 "predator_sense attributes disabled: %d\n", err);
 	}
 	if (has_cap(acer, ACER_CAP_NITRO_SENSE_V4)) {
 		err = devm_device_add_group(&pdev->dev,
 					    &nitro_sense_v4_attr_group);
 		if (err)
-			return err;
+			dev_warn(&pdev->dev,
+				 "nitro_sense attributes disabled: %d\n", err);
 	}
 	if (has_cap(acer, ACER_CAP_NITRO_SENSE)) {
 		err = devm_device_add_group(&pdev->dev,
 					    &nitro_sense_attr_group);
 		if (err)
-			return err;
+			dev_warn(&pdev->dev,
+				 "nitro_sense attributes disabled: %d\n", err);
 	}
 
-	err = linuwu_sense_keyboard_init(acer);
-	if (err)
-		return err;
+	if (has_feature(acer, LS_FEAT_KEYBOARD_4ZONE)) {
+		err = linuwu_sense_keyboard_init(acer);
+		if (err) {
+			dev_warn(&pdev->dev,
+				 "keyboard frontend disabled: %d\n", err);
+			ls_clear_feature(acer, LS_FEAT_KEYBOARD_4ZONE);
+		}
+	}
 
-	err = linuwu_sense_battery_init(acer);
-	if (err)
-		return err;
+	if (has_feature(acer, LS_FEAT_BATTERY_HEALTH)) {
+		err = linuwu_sense_battery_init(acer);
+		if (err) {
+			dev_warn(&pdev->dev,
+				 "battery health frontend disabled: %d\n", err);
+			ls_clear_feature(acer, LS_FEAT_BATTERY_HEALTH);
+		}
+	}
 
 	/*
 	 * The hwmon frontend provides the sensor readings and the fan control:
@@ -694,8 +1378,12 @@ static int acer_platform_probe(struct platform_device *pdev)
 	if (has_cap(acer, ACER_CAP_FAN_SPEED_READ) ||
 	    has_cap(acer, ACER_CAP_TURBO_FAN)) {
 		err = acer_wmi_hwmon_init(acer, acer->dev);
-		if (err)
-			return err;
+		if (err) {
+			dev_warn(&pdev->dev,
+				 "hwmon frontend disabled: %d\n", err);
+			ls_clear_feature(acer, LS_FEAT_FAN_TACH |
+						 LS_FEAT_FAN_CONTROL);
+		}
 	}
 
 	mutex_lock(&acer->event_lock);
@@ -727,8 +1415,6 @@ static void acer_platform_remove(struct platform_device *pdev)
 	mutex_lock(&acer->event_lock);
 	acer->ready = false;
 	mutex_unlock(&acer->event_lock);
-
-	linuwu_sense_keyboard_save_state(acer);
 
 	/*
 	 * All remaining resources (input, hwmon, platform profile, LED
@@ -1229,33 +1915,43 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 
 	set_quirks(acer);
 
+	acer->config = &linuwu_sense_config;
+	acer->caps.allowed = linuwu_sense_allowed;
+	acer->caps.default_on = linuwu_sense_default_on;
+	acer->caps.requested = linuwu_sense_config.requested;
+	acer->caps.effective = acer->caps.requested;
+	acer_wmi_caps_probe(acer);
+
+	linuwu_sense_dbg(acer->parent,
+			 "model boundary 0x%x, defaults 0x%x, requested 0x%x, effective 0x%x\n",
+			 acer->caps.allowed, acer->caps.default_on,
+			 acer->caps.requested, acer->caps.effective);
+
 	/*
 	 * Bring up the firmware side of the Acer interface before any
-	 * interface is published to the rest of the system.
+	 * interface is published to the rest of the system. These handshakes
+	 * are best effort: a failure is reported but must not turn the whole
+	 * aggregate into a terminal failure.
 	 */
-	err = 0;
 	mutex_lock(&acer->lock);
 	if (linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE) &&
 	    (acer->capability & ACER_CAP_SET_FUNCTION_MODE)) {
 		if (linuwu_sense_gaming_enable_rf_button(acer))
-			pr_warn("Cannot enable RF Button Driver\n");
+			dev_warn(acer->parent, "cannot enable RF button\n");
 
 		if (ec_raw_mode) {
-			if (linuwu_sense_gaming_enable_ec_raw(acer)) {
-				pr_err("Cannot enable EC raw mode\n");
-				err = -ENODEV;
-			}
+			if (linuwu_sense_gaming_enable_ec_raw(acer))
+				dev_warn(acer->parent,
+					 "cannot enable EC raw mode\n");
 		} else if (linuwu_sense_gaming_enable_launch_manager(acer)) {
-			pr_err("Cannot enable Launch Manager mode\n");
-			err = -ENODEV;
+			dev_warn(acer->parent,
+				 "cannot enable launch manager mode\n");
 		}
 	} else if (ec_raw_mode) {
-		pr_info("No WMID EC raw mode enable method\n");
+		linuwu_sense_dbg(acer->parent,
+				 "no WMID EC raw mode enable method\n");
 	}
 	mutex_unlock(&acer->lock);
-
-	if (err)
-		return err;
 
 	/*
 	 * Keep a stable device name for the logical device of the only
@@ -1314,9 +2010,9 @@ static void acer_wmi_teardown(void)
 
 	/*
 	 * Unregister the platform devices while all WMI devices are still
-	 * bound, so that the state is saved before the WMI devices are gone.
-	 * The instances themselves stay allocated until the WMI devices have
-	 * been removed by wmi_driver_unregister() below.
+	 * bound, so that the frontend teardown runs in the normal order. The
+	 * instances themselves stay allocated until the WMI devices have been
+	 * removed by wmi_driver_unregister() below.
 	 */
 	list_for_each_entry_safe(acer, tmp, &acer_wmi_instances, node)
 		acer_wmi_instance_deactivate(acer);
@@ -1335,11 +2031,87 @@ static void acer_wmi_teardown(void)
 	mutex_unlock(&acer_wmi_instances_lock);
 }
 
+static const char *ls_probe_state_name(const struct acer_wmi *acer, u32 bit)
+{
+	int index = ls_feature_index(bit);
+
+	if (!(acer->caps.requested & bit))
+		return "disabled";
+	if (index < 0 || index >= LS_FEAT_COUNT)
+		return "invalid";
+
+	switch (acer->caps.state[index]) {
+	case LS_PROBE_NOT_PROBED:
+		return "default";
+	case LS_PROBE_SUPPORTED:
+		return "supported";
+	case LS_PROBE_UNSUPPORTED:
+		return "unsupported";
+	case LS_PROBE_INCONCLUSIVE:
+		return "inconclusive";
+	case LS_PROBE_DEFERRED:
+		return "deferred";
+	default:
+		return "unknown";
+	}
+}
+
+static void ls_caps_show_one(struct seq_file *m, const struct acer_wmi *acer)
+{
+	const char *model = dmi_get_system_info(DMI_PRODUCT_NAME);
+	unsigned int i;
+
+	seq_printf(m, "device: %s\n",
+		   acer->parent ? dev_name(acer->parent) : "unknown");
+	seq_printf(m, "model: %s\n", model ? model : "unknown");
+	seq_printf(m, "allowed:    0x%08x\n", acer->caps.allowed);
+	seq_printf(m, "default_on: 0x%08x\n", acer->caps.default_on);
+	seq_printf(m, "requested:  0x%08x\n", acer->caps.requested);
+	seq_printf(m, "effective:  0x%08x\n",
+		   acer->caps.effective);
+	seq_printf(m, "sensors:    0x%016llx\n",
+		   (unsigned long long)acer->caps.sensors);
+	seq_printf(m, "profiles:   0x%016lx\n", acer->caps.profiles);
+	seq_puts(m, "\n");
+
+	seq_printf(m, "%-20s %-7s %-12s %-7s %s\n", "feature", "enabled",
+		   "probe", "error", "configured");
+	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++) {
+		const struct linuwu_sense_feature_desc *feature =
+			&linuwu_sense_features[i];
+		int index = ls_feature_index(feature->bit);
+
+		seq_printf(m, "%-20s %-7s %-12s %-7d %s\n", feature->name,
+			   (acer->caps.effective & feature->bit) ? "yes" : "no",
+			   ls_probe_state_name(acer, feature->bit),
+			   (index >= 0 && index < LS_FEAT_COUNT) ?
+				   acer->caps.last_err[index] :
+				   0,
+			   (acer->caps.requested & feature->bit) ? "yes" : "no");
+	}
+	seq_puts(m, "\n");
+}
+
+static int linuwu_sense_caps_show(struct seq_file *m, void *v)
+{
+	struct acer_wmi *acer;
+
+	mutex_lock(&acer_wmi_instances_lock);
+	list_for_each_entry(acer, &acer_wmi_instances, node)
+		ls_caps_show_one(m, acer);
+	mutex_unlock(&acer_wmi_instances_lock);
+
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(linuwu_sense_caps);
+
+static struct dentry *linuwu_sense_debugfs;
+
 static int __init acer_wmi_init(void)
 {
 	int err;
 
-	pr_info("Acer Laptop ACPI-WMI Extras\n");
+	pr_info("loading\n");
 
 	/*
 	 * This driver only controls Acer Predator/Nitro machines. Reject
@@ -1347,9 +2119,18 @@ static int __init acer_wmi_init(void)
 	 */
 	acer_wmi_quirks = linuwu_sense_quirks_match();
 	if (!acer_wmi_quirks) {
-		pr_info("Unsupported hardware detected - not loading\n");
+		pr_warn("unsupported hardware, not loading\n");
 		return -ENODEV;
 	}
+
+	linuwu_sense_config_init(acer_wmi_quirks);
+
+	linuwu_sense_debugfs = debugfs_create_dir("linuwu_sense", NULL);
+	if (!IS_ERR_OR_NULL(linuwu_sense_debugfs))
+		debugfs_create_file("capabilities", 0444, linuwu_sense_debugfs,
+				    NULL, &linuwu_sense_caps_fops);
+	else
+		linuwu_sense_debugfs = NULL;
 
 	mutex_lock(&acer_wmi_instances_lock);
 	acer_wmi_shutting_down = false;
@@ -1358,14 +2139,14 @@ static int __init acer_wmi_init(void)
 	err = platform_driver_register(&acer_platform_driver);
 	if (err) {
 		pr_err("Unable to register platform driver\n");
-		return err;
+		goto err_debugfs;
 	}
 
 	err = wmi_driver_register(&acer_wmi_driver);
 	if (err) {
 		pr_err("Unable to register WMI driver\n");
 		platform_driver_unregister(&acer_platform_driver);
-		return err;
+		goto err_debugfs;
 	}
 
 	/*
@@ -1374,13 +2155,18 @@ static int __init acer_wmi_init(void)
 	 * driver core also probes matching WMI devices which appear later.
 	 */
 	return 0;
+
+err_debugfs:
+	debugfs_remove_recursive(linuwu_sense_debugfs);
+	linuwu_sense_debugfs = NULL;
+	return err;
 }
 
 static void __exit acer_wmi_exit(void)
 {
+	debugfs_remove_recursive(linuwu_sense_debugfs);
+	linuwu_sense_debugfs = NULL;
 	acer_wmi_teardown();
-
-	pr_info("Acer Laptop WMI Extras unloaded\n");
 }
 
 module_init(acer_wmi_init);

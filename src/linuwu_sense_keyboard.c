@@ -3,18 +3,18 @@
  *  Four zone keyboard backlight for the Acer Predator/Nitro driver.
  *
  *  This module implements the keyboard backlight commands of the Predator
- *  Gaming WMI interface, one multicolor LED class device per keyboard zone
- *  and the persistence of the backlight state across module loads. The Acer
- *  specific effect settings which the LED subsystem cannot express stay
- *  available through a vendor sysfs attribute. The core driver only calls the
- *  init and save entry points, the state itself is private to this module.
+ *  Gaming WMI interface and one multicolor LED class device per keyboard zone.
+ *  The Acer specific effect settings which the LED subsystem cannot express
+ *  stay available through a vendor sysfs attribute. The core driver only calls
+ *  the probe and init entry points, the state itself is private to this module.
+ *  Static zone colours are applied from options= at load time; the module
+ *  never reads or writes a file.
  */
 
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
 #include <linux/bits.h>
 #include <linux/device.h>
-#include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/led-class-multicolor.h>
 #include <linux/math.h>
@@ -26,7 +26,6 @@
 
 #include "linuwu_sense.h"
 #include "linuwu_sense_keyboard.h"
-#include "linuwu_sense_quirks.h"
 
 /*
  * Method IDs of the four zone keyboard backlight
@@ -35,8 +34,6 @@
 #define ACER_WMID_SET_GAMING_KB_BACKLIGHT_METHODID 20
 #define ACER_WMID_SET_GAMING_RGB_KB_METHODID 6
 #define ACER_WMID_GET_GAMING_RGB_KB_METHODID 7
-
-#define KB_STATE_FILE "/etc/four_zone_kb_state"
 
 enum linuwu_sense_keyboard_zone {
 	LINUWU_SENSE_KEYBOARD_ZONE_1,
@@ -138,7 +135,7 @@ static int linuwu_sense_keyboard_get_backlight(
 				   ACER_WMID_GET_GAMING_KB_BACKLIGHT_METHODID,
 				   &input, &output, sizeof(out));
 	if (err) {
-		pr_err("Unexpected output getting kb zone status: %d\n", err);
+		linuwu_sense_pr_dbg("Unexpected output getting kb zone status: %d\n", err);
 		goto out;
 	}
 
@@ -199,7 +196,7 @@ static int linuwu_sense_keyboard_set_backlight(
 	kfree(output.data);
 
 	if (resp != 0) {
-		pr_err("failed to set keyboard rgb: %llu\n", resp);
+		linuwu_sense_pr_dbg("failed to set keyboard rgb: %llu\n", resp);
 		err = -EIO;
 	}
 
@@ -239,7 +236,7 @@ static int linuwu_sense_keyboard_get_zone_color(
 	return 0;
 
 err_log:
-	pr_err("Error getting kb status (zone %d): %d\n", zone + 1, err);
+	linuwu_sense_pr_dbg("Error getting kb status (zone %d): %d\n", zone + 1, err);
 	return err;
 }
 
@@ -264,7 +261,7 @@ static int linuwu_sense_keyboard_set_zone_color(
 				   &output, sizeof(u32));
 	kfree(output.data);
 	if (err)
-		pr_err("Error setting KB color (zone %d): %d\n", zone + 1, err);
+		linuwu_sense_pr_dbg("Error setting KB color (zone %d): %d\n", zone + 1, err);
 
 	return err;
 }
@@ -302,7 +299,7 @@ static int acer_kb_led_brightness_set(struct led_classdev *led_cdev,
 	mutex_unlock(&acer->lock);
 
 	if (err)
-		pr_err("Error applying LED zone %d: %d\n", zone->zone + 1, err);
+		linuwu_sense_pr_dbg("Error applying LED zone %d: %d\n", zone->zone + 1, err);
 
 	return err;
 }
@@ -418,20 +415,20 @@ static ssize_t four_zoned_rgb_kb_store(struct device *dev,
 
 	token = strsep(&input_ptr, ",");
 	if (!token || kstrtoint(token, 10, &mode) || mode < 0 || mode > 7) {
-		pr_err("Invalid mode value.\n");
+		linuwu_sense_pr_dbg("Invalid mode value.\n");
 		return -EINVAL;
 	}
 
 	token = strsep(&input_ptr, ",");
 	if (!token || kstrtoint(token, 10, &speed) || speed < 0 || speed > 9) {
-		pr_err("Invalid speed value.\n");
+		linuwu_sense_pr_dbg("Invalid speed value.\n");
 		return -EINVAL;
 	}
 
 	token = strsep(&input_ptr, ",");
 	if (!token || kstrtoint(token, 10, &brightness) || brightness < 0 ||
 	    brightness > 100) {
-		pr_err("Invalid brightness value.\n");
+		linuwu_sense_pr_dbg("Invalid brightness value.\n");
 		return -EINVAL;
 	}
 
@@ -439,26 +436,26 @@ static ssize_t four_zoned_rgb_kb_store(struct device *dev,
 	if (!token || kstrtoint(token, 10, &direction) ||
 	    (direction <= 0 && (mode == 0x3 || mode == 0x4)) || direction < 0 ||
 	    direction > 2) {
-		pr_err("Invalid direction value.\n");
+		linuwu_sense_pr_dbg("Invalid direction value.\n");
 		return -EINVAL;
 	}
 
 	token = strsep(&input_ptr, ",");
 	if (!token || kstrtoint(token, 10, &red) || red < 0 || red > 255) {
-		pr_err("Invalid red value.\n");
+		linuwu_sense_pr_dbg("Invalid red value.\n");
 		return -EINVAL;
 	}
 
 	token = strsep(&input_ptr, ",");
 	if (!token || kstrtoint(token, 10, &green) || green < 0 ||
 	    green > 255) {
-		pr_err("Invalid green value.\n");
+		linuwu_sense_pr_dbg("Invalid green value.\n");
 		return -EINVAL;
 	}
 
 	token = strsep(&input_ptr, ",");
 	if (!token || kstrtoint(token, 10, &blue) || blue < 0 || blue > 255) {
-		pr_err("Invalid blue value.\n");
+		linuwu_sense_pr_dbg("Invalid blue value.\n");
 		return -EINVAL;
 	}
 
@@ -494,7 +491,7 @@ static ssize_t four_zoned_rgb_kb_store(struct device *dev,
 		direction = 0;
 		break;
 	default:
-		pr_err("Invalid mode value.\n");
+		linuwu_sense_pr_dbg("Invalid mode value.\n");
 		return -EINVAL;
 	}
 
@@ -510,7 +507,7 @@ static ssize_t four_zoned_rgb_kb_store(struct device *dev,
 	err = linuwu_sense_keyboard_set_backlight(acer, &state);
 	if (err) {
 		mutex_unlock(&acer->lock);
-		pr_err("Error setting RGB KB status.\n");
+		linuwu_sense_pr_dbg("Error setting RGB KB status.\n");
 		return -ENODEV;
 	}
 
@@ -540,7 +537,7 @@ static int get_per_zone_color(struct acer_wmi *acer,
 	/* Fetching Brighness Value */
 	err = linuwu_sense_keyboard_get_backlight(acer, &state);
 	if (err) {
-		pr_err("get kb status failed!");
+		linuwu_sense_pr_dbg("get kb status failed!\n");
 		return err;
 	}
 	output->brightness = state.brightness;
@@ -560,7 +557,7 @@ static int set_per_zone_color(struct acer_wmi *acer,
 
 	err = linuwu_sense_keyboard_set_backlight(acer, &state);
 	if (err) {
-		pr_err("Error setting KB status.\n");
+		linuwu_sense_pr_dbg("Error setting KB status.\n");
 		return err;
 	}
 
@@ -578,25 +575,6 @@ static int set_per_zone_color(struct acer_wmi *acer,
 
 /* BackLight State */
 
-static bool kb_state_valid(const struct kb_state *state)
-{
-	if (state->per_zone > 1)
-		return false;
-	if (state->mode > 7 || state->speed > 9)
-		return false;
-	if (state->brightness > 100 || state->direction > 2)
-		return false;
-	if (state->zones.brightness < 0 || state->zones.brightness > 100)
-		return false;
-	if (state->zones.zone1 >= BIT_ULL(24) ||
-	    state->zones.zone2 >= BIT_ULL(24) ||
-	    state->zones.zone3 >= BIT_ULL(24) ||
-	    state->zones.zone4 >= BIT_ULL(24))
-		return false;
-
-	return true;
-}
-
 static int four_zone_kb_state_update(struct acer_wmi *acer)
 {
 	struct linuwu_sense_keyboard *kb = acer->keyboard;
@@ -607,7 +585,7 @@ static int four_zone_kb_state_update(struct acer_wmi *acer)
 	/* Get keyboard status */
 	err = linuwu_sense_keyboard_get_backlight(acer, &out);
 	if (err) {
-		pr_err("get kb status failed!");
+		linuwu_sense_pr_dbg("get kb status failed!\n");
 		return -EIO;
 	}
 
@@ -622,122 +600,13 @@ static int four_zone_kb_state_update(struct acer_wmi *acer)
 	/* Get per-zone color data */
 	err = get_per_zone_color(acer, &state.zones);
 	if (err) {
-		pr_err("get_per_zone_color failed!");
+		linuwu_sense_pr_dbg("get_per_zone_color failed!\n");
 		return -EIO;
 	}
 
 	kb->state = state;
 
 	return 0;
-}
-
-static int four_zone_kb_state_save(struct acer_wmi *acer)
-{
-	struct file *file;
-	ssize_t len;
-	int err;
-	struct kb_state state;
-
-	mutex_lock(&acer->lock);
-	err = four_zone_kb_state_update(acer);
-	if (err) {
-		mutex_unlock(&acer->lock);
-		return err;
-	}
-	state = acer->keyboard->state;
-	mutex_unlock(&acer->lock);
-
-	file = filp_open(KB_STATE_FILE, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (IS_ERR(file)) {
-		pr_err("kb_state_access - Error opening file\n");
-		return PTR_ERR(file);
-	}
-
-	len = kernel_write(file, (char *)&state, sizeof(state), &file->f_pos);
-	if (len < 0)
-		pr_err("kb_state_access - Error writing to file: %ld\n", len);
-
-	filp_close(file, NULL);
-
-	if (len != sizeof(state)) {
-		pr_err("Failed to write complete state to file\n");
-		return -EIO;
-	}
-
-	pr_info("kb states saved successfully\n");
-	return 0;
-}
-
-static int four_zone_kb_state_load(struct acer_wmi *acer)
-{
-	struct file *file;
-	ssize_t len;
-	int err;
-	struct kb_state state;
-
-	mutex_lock(&acer->lock);
-
-	file = filp_open(KB_STATE_FILE, O_RDONLY, 0);
-	if (!IS_ERR(file)) {
-		len = kernel_read(file, (char *)&state, sizeof(state),
-				  &file->f_pos);
-		filp_close(file, NULL);
-
-		if (len != sizeof(state)) {
-			pr_err("Incomplete state read\n");
-			err = -EIO;
-			goto out;
-		}
-
-		if (!kb_state_valid(&state)) {
-			pr_err("Invalid KB state data\n");
-			err = -EINVAL;
-			goto out;
-		}
-
-		pr_info("KB states loaded\n");
-	} else {
-		pr_info("KB state file not found!\n");
-		err = -ENOENT;
-		goto out;
-	}
-
-	if (state.per_zone) {
-		struct per_zone_color zones = state.zones;
-
-		err = set_per_zone_color(acer, &zones);
-		if (err) {
-			pr_err("Error setting RGB KB status.\n");
-			err = -EIO;
-			goto out;
-		}
-	} else {
-		struct linuwu_sense_keyboard_backlight kb = {
-			.mode = state.mode,
-			.speed = state.speed,
-			.brightness = state.brightness,
-			.direction = state.direction,
-			.red = state.red,
-			.green = state.green,
-			.blue = state.blue,
-		};
-
-		err = linuwu_sense_keyboard_set_backlight(acer, &kb);
-		if (err) {
-			pr_err("Error setting KB status.\n");
-			err = -EIO;
-			goto out;
-		}
-	}
-
-	acer->keyboard->state = state;
-
-	pr_info("KB states restored successfully\n");
-	err = 0;
-
-out:
-	mutex_unlock(&acer->lock);
-	return err;
 }
 
 /*
@@ -750,18 +619,97 @@ static struct device_attribute four_zoned_rgb_mode = __ATTR(
 static struct attribute *four_zoned_kb_attrs[] = { &four_zoned_rgb_mode.attr,
 						   NULL };
 
+static umode_t four_zoned_kb_attr_is_visible(struct kobject *kobj,
+					       struct attribute *attr, int n)
+{
+	struct acer_wmi *acer = dev_get_drvdata(kobj_to_dev(kobj));
+
+	if (!acer || !(acer->caps.effective & LS_FEAT_KEYBOARD_4ZONE))
+		return 0;
+
+	return attr->mode;
+}
+
 /* Four Zoned RGB Keyboard */
 static struct attribute_group four_zoned_kb_attr_group = {
 	.name = "four_zoned_kb",
-	.attrs = four_zoned_kb_attrs
+	.attrs = four_zoned_kb_attrs,
+	.is_visible = four_zoned_kb_attr_is_visible,
 };
+
+int linuwu_sense_keyboard_probe(struct acer_wmi *acer)
+{
+	struct linuwu_sense_keyboard_backlight state;
+	struct per_zone_color zones;
+	int err;
+
+	mutex_lock(&acer->lock);
+	err = linuwu_sense_keyboard_get_backlight(acer, &state);
+	if (!err)
+		err = get_per_zone_color(acer, &zones);
+	mutex_unlock(&acer->lock);
+
+	return err;
+}
+
+/*
+ * Apply the static zone colours from options=. Unspecified zones keep the
+ * current firmware value. This is a load time default, not runtime state
+ * persistence; the kernel never writes the configuration back.
+ */
+static void linuwu_sense_keyboard_apply_options(struct acer_wmi *acer)
+{
+	const struct linuwu_sense_keyboard_options *options;
+	struct per_zone_color zones;
+	bool any = false;
+	int err;
+	int i;
+
+	if (!acer->config)
+		return;
+
+	options = &acer->config->keyboard;
+	for (i = 0; i < LINUWU_SENSE_KEYBOARD_ZONE_COUNT; i++)
+		any |= options->valid[i];
+	if (!any)
+		return;
+
+	mutex_lock(&acer->lock);
+	err = four_zone_kb_state_update(acer);
+	if (err) {
+		mutex_unlock(&acer->lock);
+		dev_warn(acer->dev,
+			 "unable to read keyboard state for options: %d\n",
+			 err);
+		return;
+	}
+
+	zones = acer->keyboard->state.zones;
+	if (options->valid[0])
+		zones.zone1 = options->rgb[0];
+	if (options->valid[1])
+		zones.zone2 = options->rgb[1];
+	if (options->valid[2])
+		zones.zone3 = options->rgb[2];
+	if (options->valid[3])
+		zones.zone4 = options->rgb[3];
+
+	err = set_per_zone_color(acer, &zones);
+	if (!err)
+		err = four_zone_kb_state_update(acer);
+	mutex_unlock(&acer->lock);
+
+	if (err)
+		dev_warn(acer->dev,
+			 "unable to apply static keyboard options: %d\n", err);
+}
 
 int linuwu_sense_keyboard_init(struct acer_wmi *acer)
 {
 	struct linuwu_sense_keyboard *kb;
 	int err;
 
-	if (!acer->quirks->four_zone_kb)
+	if (!(acer->caps.effective & LS_FEAT_KEYBOARD_4ZONE))
 		return 0;
 
 	kb = devm_kzalloc(acer->dev, sizeof(*kb), GFP_KERNEL);
@@ -775,25 +723,17 @@ int linuwu_sense_keyboard_init(struct acer_wmi *acer)
 	if (err)
 		return err;
 
-	/* Restore the persisted state, then sync the driver view with the EC. */
-	four_zone_kb_state_load(acer);
-
 	mutex_lock(&acer->lock);
 	if (four_zone_kb_state_update(acer))
-		pr_warn("Could not read back the keyboard state\n");
+		dev_warn(acer->dev,
+			 "unable to read back the keyboard state\n");
 	mutex_unlock(&acer->lock);
+
+	linuwu_sense_keyboard_apply_options(acer);
 
 	err = acer_kb_leds_init(acer);
 	if (err)
 		return err;
 
 	return 0;
-}
-
-void linuwu_sense_keyboard_save_state(struct acer_wmi *acer)
-{
-	if (!acer->keyboard)
-		return;
-
-	four_zone_kb_state_save(acer);
 }

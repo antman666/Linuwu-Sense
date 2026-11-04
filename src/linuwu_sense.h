@@ -25,7 +25,8 @@ struct platform_device;
 struct wmi_device;
 
 /*
- * Interface capability flags
+ * Interface capability flags. The family flags select the userspace frontend
+ * group, the feature flags below decide which individual controls exist.
  */
 #define ACER_CAP_SET_FUNCTION_MODE BIT(5)
 #define ACER_CAP_TURBO_FAN BIT(9)
@@ -34,6 +35,70 @@ struct wmi_device;
 #define ACER_CAP_PREDATOR_SENSE BIT(12)
 #define ACER_CAP_NITRO_SENSE BIT(13)
 #define ACER_CAP_NITRO_SENSE_V4 BIT(14)
+
+/*
+ * Independently switchable hardware features. The DMI model table provides
+ * the allowed set (the hard boundary) and the default set (the historical
+ * behaviour); the feature= module parameter can only move bits inside the
+ * allowed set, and runtime probes can only take bits away.
+ */
+#define LS_FEAT_FAN_TACH BIT(0)
+#define LS_FEAT_FAN_CONTROL BIT(1)
+#define LS_FEAT_THERMAL_PROFILE BIT(2)
+#define LS_FEAT_KEYBOARD_4ZONE BIT(3)
+#define LS_FEAT_BATTERY_HEALTH BIT(4)
+#define LS_FEAT_USB_CHARGING BIT(5)
+#define LS_FEAT_BACKLIGHT_TIMEOUT BIT(6)
+#define LS_FEAT_BOOT_ANIMATION BIT(7)
+#define LS_FEAT_LCD_OVERRIDE BIT(8)
+
+#define LS_FEAT_COUNT 9
+
+enum linuwu_sense_probe_state {
+	LS_PROBE_NOT_PROBED,
+	LS_PROBE_SUPPORTED,
+	LS_PROBE_UNSUPPORTED,
+	LS_PROBE_INCONCLUSIVE,
+	LS_PROBE_DEFERRED,
+};
+
+/*
+ * Per feature state of one instance. The feature bit index is used as array
+ * index (LS_FEAT_FAN_TACH is index 0, ...).
+ */
+struct linuwu_sense_caps {
+	u32 allowed;
+	u32 default_on;
+	u32 requested;
+	u32 effective;
+	u8 state[LS_FEAT_COUNT];
+	s16 last_err[LS_FEAT_COUNT];
+	u64 sensors;
+	unsigned long profiles;
+};
+
+/*
+ * Keyboard zone colours configured through options= at module load. This is
+ * static configuration, not runtime state; the module never writes it back.
+ */
+struct linuwu_sense_keyboard_options {
+	bool valid[4];
+	u32 rgb[4];
+};
+
+struct linuwu_sense_config {
+	u32 requested;
+	u32 enabled;
+	u32 disabled;
+	struct linuwu_sense_keyboard_options keyboard;
+};
+
+/*
+ * Log a driver detail line. Quiet by default (dev_dbg); test_mode=1 raises
+ * it to dev_info so the same line becomes visible in dmesg.
+ */
+void linuwu_sense_dbg(struct device *dev, const char *fmt, ...);
+void linuwu_sense_pr_dbg(const char *fmt, ...);
 
 /*
  * The WMI devices used by this driver. Acer firmware spreads the different
@@ -158,6 +223,16 @@ struct acer_wmi {
 
 	/* The model specific quirks which matched this machine */
 	const struct linuwu_sense_quirks *quirks;
+
+	/* Static load time feature configuration (feature= and options=) */
+	const struct linuwu_sense_config *config;
+
+	/* DMI boundary, defaults, requested and effective feature sets */
+	struct linuwu_sense_caps caps;
+
+	/* Fans that are usable for control on this instance */
+	bool cpu_fan_control;
+	bool gpu_fan_control;
 
 	/*
 	 * Protects the endpoint claims in @wdevs[] and the cached fan speed
