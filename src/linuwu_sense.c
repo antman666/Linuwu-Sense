@@ -140,18 +140,36 @@ static u32 linuwu_sense_allowed;
 struct linuwu_sense_feature_desc {
 	const char *name;
 	u32 bit;
+	/*
+	 * Bitmap of the WMI endpoints this feature needs. A feature whose
+	 * endpoints are not all present is not usable and must not be
+	 * published; the dependency is declared here instead of being
+	 * discovered through the endpoint lookups of the implementation.
+	 */
+	unsigned long requires;
 };
 
+#define LS_EP(guid) BIT(guid)
+
 static const struct linuwu_sense_feature_desc linuwu_sense_features[] = {
-	{ "fan_tach", LS_FEAT_FAN_TACH },
-	{ "fan_control", LS_FEAT_FAN_CONTROL },
-	{ "thermal_profile", LS_FEAT_THERMAL_PROFILE },
-	{ "keyboard_4zone", LS_FEAT_KEYBOARD_4ZONE },
-	{ "battery_health", LS_FEAT_BATTERY_HEALTH },
-	{ "usb_charging", LS_FEAT_USB_CHARGING },
-	{ "backlight_timeout", LS_FEAT_BACKLIGHT_TIMEOUT },
-	{ "boot_animation", LS_FEAT_BOOT_ANIMATION },
-	{ "lcd_override", LS_FEAT_LCD_OVERRIDE },
+	{ "fan_tach", LS_FEAT_FAN_TACH,
+	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
+	{ "fan_control", LS_FEAT_FAN_CONTROL,
+	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
+	{ "thermal_profile", LS_FEAT_THERMAL_PROFILE,
+	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
+	{ "keyboard_4zone", LS_FEAT_KEYBOARD_4ZONE,
+	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
+	{ "battery_health", LS_FEAT_BATTERY_HEALTH,
+	  LS_EP(ACER_WMI_GUID_WMID_BATTERY) },
+	{ "usb_charging", LS_FEAT_USB_CHARGING,
+	  LS_EP(ACER_WMI_GUID_WMID_APGE) },
+	{ "backlight_timeout", LS_FEAT_BACKLIGHT_TIMEOUT,
+	  LS_EP(ACER_WMI_GUID_WMID_APGE) },
+	{ "boot_animation", LS_FEAT_BOOT_ANIMATION,
+	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
+	{ "lcd_override", LS_FEAT_LCD_OVERRIDE,
+	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
 };
 
 static const struct linuwu_sense_feature_desc *
@@ -181,6 +199,18 @@ ls_feature_by_bit(u32 bit)
 static int ls_feature_index(u32 bit)
 {
 	return __ffs(bit);
+}
+
+static unsigned long ls_required_endpoints(u32 requested)
+{
+	unsigned long required = 0;
+	unsigned int i;
+
+	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++)
+		if (requested & linuwu_sense_features[i].bit)
+			required |= linuwu_sense_features[i].requires;
+
+	return required;
 }
 
 static int ls_param_store(char *dst, size_t size, const char *val,
@@ -551,6 +581,24 @@ struct wmi_device *linuwu_sense_endpoint_get(struct acer_wmi *acer,
 }
 
 /*
+ * Snapshot the claimed endpoints. The caller must hold acer->lock so that the
+ * bitmap cannot change while it is collected.
+ */
+static unsigned long ls_endpoints_present(struct acer_wmi *acer)
+{
+	unsigned long present = 0;
+	enum acer_wmi_guid guid;
+
+	lockdep_assert_held(&acer->lock);
+
+	for (guid = 0; guid < ACER_WMI_GUID_COUNT; guid++)
+		if (acer->wdevs[guid])
+			present |= LS_EP(guid);
+
+	return present;
+}
+
+/*
  * Capability probe. Only features the user explicitly enabled outside the
  * historical default are probed; the defaults keep their current behaviour.
  */
@@ -581,6 +629,58 @@ static void ls_probe_record(struct acer_wmi *acer, u32 bit, int err)
 	acer->caps.effective &= ~bit;
 	dev_warn(acer->parent, "feature %s: probe failed (%d), disabled\n",
 		 feature->name, err);
+}
+
+/*
+ * A feature whose declared endpoints are missing cannot be probed. This is
+ * different from a probe failure: the hardware may exist, but this boot has
+ * no way to talk to it. Record it as deferred and disable only this feature.
+ */
+static void ls_probe_defer(struct acer_wmi *acer, const struct linuwu_sense_feature_desc *feature,
+			   unsigned long missing)
+{
+	int index = ls_feature_index(feature->bit);
+
+	if (index < 0 || index >= LS_FEAT_COUNT)
+		return;
+
+	acer->caps.state[index] = LS_PROBE_DEFERRED;
+	acer->caps.last_err[index] = -ENODEV;
+	acer->caps.effective &= ~feature->bit;
+
+	dev_warn(acer->parent,
+		 "feature %s: required endpoint mask 0x%lx is missing, deferred\n",
+		 feature->name, missing);
+}
+
+static void ls_defer_missing_features(struct acer_wmi *acer)
+{
+	unsigned long missing;
+	unsigned int i;
+
+	acer->caps.endpoints_required =
+		ls_required_endpoints(acer->caps.requested);
+	missing = acer->caps.endpoints_required & ~acer->caps.endpoints_present;
+	if (!missing)
+		return;
+
+	dev_info(acer->parent,
+		 "endpoints: required 0x%lx, present 0x%lx, missing 0x%lx\n",
+		 acer->caps.endpoints_required, acer->caps.endpoints_present,
+		 missing);
+
+	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++) {
+		const struct linuwu_sense_feature_desc *feature =
+			&linuwu_sense_features[i];
+		unsigned long feature_missing;
+
+		if (!(acer->caps.requested & feature->bit))
+			continue;
+
+		feature_missing = feature->requires & missing;
+		if (feature_missing)
+			ls_probe_defer(acer, feature, feature_missing);
+	}
 }
 
 static int ls_probe_fan_tach(struct acer_wmi *acer)
@@ -738,15 +838,15 @@ static int ls_probe_lcd_override(struct acer_wmi *acer)
 
 static void acer_wmi_caps_probe(struct acer_wmi *acer)
 {
+	unsigned long missing =
+		acer->caps.endpoints_required & ~acer->caps.endpoints_present;
 	u32 want = acer->caps.requested & ~acer->caps.default_on;
 	unsigned int i;
 
-	for (i = 0; i < LS_FEAT_COUNT; i++) {
-		acer->caps.state[i] = LS_PROBE_NOT_PROBED;
-		acer->caps.last_err[i] = 0;
-	}
-
-	acer->caps.effective = acer->caps.requested;
+	/* Features without their endpoints were already recorded as deferred. */
+	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++)
+		if (linuwu_sense_features[i].requires & missing)
+			want &= ~linuwu_sense_features[i].bit;
 
 	if (want & LS_FEAT_FAN_TACH)
 		ls_probe_record(acer, LS_FEAT_FAN_TACH,
@@ -1507,10 +1607,11 @@ static struct platform_driver acer_platform_driver = {
  * WMI device handling
  *
  * A WMI bus device of an Acer Predator/Nitro laptop exposes the Acer
- * interface as several WMI devices with different GUIDs. The driver needs one
- * device per GUID: the APGE, GAMING and BATTERY endpoints are required for
- * the aggregate to work at all, while the event endpoint only provides the
- * hotkey input frontend.
+ * interface as several WMI devices with different GUIDs. The driver uses one
+ * device per GUID, but none of them is required for the aggregate to exist:
+ * every feature declares the endpoints it needs, and a feature whose endpoints
+ * are missing is deferred while the other features keep working. The event
+ * endpoint only provides the hotkey input frontend.
  *
  * The WMI core guarantees that all WMI devices of a WMI bus device are
  * registered before any of them is probed: wmi_add_device() adds a device link
@@ -1524,30 +1625,30 @@ static struct platform_driver acer_platform_driver = {
  */
 struct acer_wmi_endpoint {
 	enum acer_wmi_guid guid;
+	const char *name;
 	const char *guid_string;
-	bool required;
 };
 
 static const struct acer_wmi_endpoint acer_wmi_endpoints[ACER_WMI_GUID_COUNT] = {
 	[ACER_WMI_GUID_WMID_APGE] = {
 		.guid = ACER_WMI_GUID_WMID_APGE,
+		.name = "APGE",
 		.guid_string = WMID_GUID3,
-		.required = true,
 	},
 	[ACER_WMI_GUID_WMID_GAMING] = {
 		.guid = ACER_WMI_GUID_WMID_GAMING,
+		.name = "GAMING",
 		.guid_string = WMID_GUID4,
-		.required = true,
 	},
 	[ACER_WMI_GUID_WMID_BATTERY] = {
 		.guid = ACER_WMI_GUID_WMID_BATTERY,
+		.name = "BATTERY",
 		.guid_string = WMID_GUID5,
-		.required = true,
 	},
 	[ACER_WMI_GUID_EVENT] = {
 		.guid = ACER_WMI_GUID_EVENT,
+		.name = "EVENT",
 		.guid_string = ACERWMID_EVENT_GUID,
-		.required = false,
 	},
 };
 
@@ -1609,26 +1710,6 @@ static int acer_wmi_topology_scan(struct device *dev, void *data)
 	return 0;
 }
 
-static bool acer_wmi_topology_is_supported(struct device *dev,
-					   const struct acer_wmi_topology *topo)
-{
-	enum acer_wmi_guid guid;
-
-	for (guid = 0; guid < ACER_WMI_GUID_COUNT; guid++) {
-		if (!acer_wmi_endpoints[guid].required ||
-		    test_bit(guid, &topo->guids))
-			continue;
-
-		dev_warn(
-			dev,
-			"required Acer WMI interface %s is missing, refusing to bind\n",
-			acer_wmi_endpoints[guid].guid_string);
-		return false;
-	}
-
-	return true;
-}
-
 static struct acer_wmi *acer_wmi_instance_find(struct device *parent)
 {
 	struct acer_wmi *acer;
@@ -1665,7 +1746,7 @@ acer_wmi_instance_create(struct device *parent,
 
 	acer->parent = parent;
 	acer->quirks = acer_wmi_quirks;
-	acer->wdev_expected = topo->endpoints;
+	acer->endpoints_expected = topo->endpoints;
 	acer->probes_expected = topo->devices;
 	mutex_init(&acer->lock);
 	mutex_init(&acer->event_lock);
@@ -1771,48 +1852,40 @@ static void acer_wmi_instance_drop(struct acer_wmi *acer)
 }
 
 /*
- * Advance a COLLECTING instance: set up the logical device once the complete
- * endpoint set is claimed, or mark the instance FAILED once every expected
- * probe has run without completing the set. Must be called with
- * acer_wmi_instances_lock held.
+ * Advance a COLLECTING instance. It is set up once the complete endpoint
+ * topology has been claimed, or once every expected probe has run with a
+ * subset bound. The latter is not a failure: features whose endpoints are
+ * missing are deferred by the setup path and the remaining features keep
+ * working. Must be called with acer_wmi_instances_lock held.
  */
 static void acer_wmi_instance_advance(struct acer_wmi *acer, struct device *dev)
 {
+	bool complete = acer->wdev_count == acer->endpoints_expected;
+	bool exhausted = acer->probes_seen >= acer->probes_expected;
 	int err;
 
 	if (acer->state != ACER_WMI_COLLECTING)
 		return;
 
-	if (acer->wdev_count == acer->wdev_expected) {
-		/*
-		 * The complete endpoint set is bound: bring up the logical
-		 * platform device. It only succeeds when all its frontends
-		 * were registered, otherwise the aggregate fails without
-		 * leaving a partial interface behind.
-		 */
-		err = acer_wmi_instance_setup(acer);
-		if (err) {
-			dev_err(dev,
-				"unable to set up the logical device: %d\n",
-				err);
-			acer->state = ACER_WMI_FAILED;
-		} else {
-			acer->state = ACER_WMI_ACTIVE;
-		}
-
-		return;
-	}
-
 	/*
-	 * The endpoint set is not complete yet. Once every expected probe has
-	 * run the set can no longer be completed, because all WMI devices of
-	 * a WMI bus device were already registered when probing started.
+	 * Before the last expected probe has run a missing endpoint may still
+	 * be a probe that has not happened yet. Once the complete topology is
+	 * claimed, or once every probe has run, the endpoint set is final.
 	 */
-	if (acer->probes_seen >= acer->probes_expected) {
-		dev_err(dev,
-			"only %u of %u Acer WMI endpoints bound, aggregate disabled\n",
-			acer->wdev_count, acer->wdev_expected);
+	if (!complete && !exhausted)
+		return;
+
+	if (!complete)
+		dev_info(dev,
+			 "only %u of %u Acer WMI endpoints bound, setting up with the available subset\n",
+			 acer->wdev_count, acer->endpoints_expected);
+
+	err = acer_wmi_instance_setup(acer);
+	if (err) {
+		dev_err(dev, "unable to set up the logical device: %d\n", err);
 		acer->state = ACER_WMI_FAILED;
+	} else {
+		acer->state = ACER_WMI_ACTIVE;
 	}
 }
 
@@ -1836,15 +1909,12 @@ static int acer_wmi_wdev_probe(struct wmi_device *wdev, const void *context)
 		/*
 		 * All WMI devices of a WMI bus device are already registered
 		 * when the first of them is probed, so the complete topology
-		 * can be validated before the instance is created. Machines
-		 * without all required Acer interfaces are not supported.
+		 * is known before the instance is created. It is used to
+		 * decide when the endpoint set is final and to set up the
+		 * features whose dependencies are present.
 		 */
 		device_for_each_child(wdev->dev.parent, &topo,
 				      acer_wmi_topology_scan);
-		if (!acer_wmi_topology_is_supported(&wdev->dev, &topo)) {
-			err = -ENODEV;
-			goto out_unlock;
-		}
 
 		acer = acer_wmi_instance_create(wdev->dev.parent, &topo);
 		if (!acer) {
@@ -1968,6 +2038,7 @@ static struct wmi_driver acer_wmi_driver = {
 static int acer_wmi_instance_setup(struct acer_wmi *acer)
 {
 	struct acer_wmi *other;
+	unsigned int i;
 	int err, id = PLATFORM_DEVID_NONE;
 
 	lockdep_assert_held(&acer_wmi_instances_lock);
@@ -1978,6 +2049,7 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 	mutex_lock(&acer->lock);
 	if (linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE))
 		acer->capability |= ACER_CAP_SET_FUNCTION_MODE;
+	acer->caps.endpoints_present = ls_endpoints_present(acer);
 	mutex_unlock(&acer->lock);
 
 	set_quirks(acer);
@@ -1987,6 +2059,13 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 	acer->caps.default_on = linuwu_sense_default_on;
 	acer->caps.requested = linuwu_sense_config.requested;
 	acer->caps.effective = acer->caps.requested;
+
+	for (i = 0; i < LS_FEAT_COUNT; i++) {
+		acer->caps.state[i] = LS_PROBE_NOT_PROBED;
+		acer->caps.last_err[i] = 0;
+	}
+
+	ls_defer_missing_features(acer);
 	acer_wmi_caps_probe(acer);
 
 	linuwu_sense_dbg(acer->parent,
@@ -2136,24 +2215,29 @@ static void ls_caps_show_one(struct seq_file *m, const struct acer_wmi *acer)
 	seq_printf(m, "requested:  0x%08x\n", acer->caps.requested);
 	seq_printf(m, "effective:  0x%08x\n",
 		   acer->caps.effective);
+	seq_printf(m, "endpoints:  present 0x%lx, required 0x%lx, missing 0x%lx\n",
+		   acer->caps.endpoints_present, acer->caps.endpoints_required,
+		   acer->caps.endpoints_required & ~acer->caps.endpoints_present);
 	seq_printf(m, "sensors:    0x%016llx\n",
 		   (unsigned long long)acer->caps.sensors);
 	seq_printf(m, "profiles:   0x%016lx\n", acer->caps.profiles);
 	seq_puts(m, "\n");
 
-	seq_printf(m, "%-20s %-7s %-12s %-7s %s\n", "feature", "enabled",
-		   "probe", "error", "configured");
+	seq_printf(m, "%-20s %-7s %-12s %-7s %-8s %s\n", "feature",
+		   "enabled", "probe", "error", "requires", "configured");
 	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++) {
 		const struct linuwu_sense_feature_desc *feature =
 			&linuwu_sense_features[i];
 		int index = ls_feature_index(feature->bit);
 
-		seq_printf(m, "%-20s %-7s %-12s %-7d %s\n", feature->name,
+		seq_printf(m, "%-20s %-7s %-12s %-7d 0x%-6lx %s\n",
+			   feature->name,
 			   (acer->caps.effective & feature->bit) ? "yes" : "no",
 			   ls_probe_state_name(acer, feature->bit),
 			   (index >= 0 && index < LS_FEAT_COUNT) ?
 				   acer->caps.last_err[index] :
 				   0,
+			   feature->requires,
 			   (acer->caps.requested & feature->bit) ? "yes" : "no");
 	}
 	seq_puts(m, "\n");

@@ -75,6 +75,15 @@ struct linuwu_sense_caps {
 	s16 last_err[LS_FEAT_COUNT];
 	u64 sensors;
 	unsigned long profiles;
+
+	/*
+	 * The endpoints that were claimed when the instance was set up and
+	 * the endpoints the requested features declare as required. The
+	 * difference decides which features are deferred instead of being
+	 * probed.
+	 */
+	unsigned long endpoints_present;
+	unsigned long endpoints_required;
 };
 
 /*
@@ -179,11 +188,12 @@ struct acer_wmi {
 
 	/*
 	 * Number of distinct Acer GUIDs exposed by the WMI bus device this
-	 * instance belongs to. This is the number of endpoints that have to be
-	 * claimed before the instance can be set up. Captured when the
-	 * instance is created. Protected by acer_wmi_instances_lock.
+	 * instance belongs to. This is the size of the endpoint topology, not
+	 * a requirement: the instance is set up with whatever subset the
+	 * requested features need. Captured when the instance is created.
+	 * Protected by acer_wmi_instances_lock.
 	 */
-	unsigned int wdev_expected;
+	unsigned int endpoints_expected;
 
 	/*
 	 * Number of matching WMI devices below the WMI bus device when the
