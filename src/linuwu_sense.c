@@ -667,6 +667,29 @@ static void ls_verify_record(struct acer_wmi *acer,
 }
 
 /*
+ * The firmware answered and reports support, but the matched model is known
+ * to have a broken implementation. Keep the evidence for debugging, but do
+ * not make the feature available.
+ */
+static void ls_deny_record(struct acer_wmi *acer,
+			   const struct linuwu_sense_feature_desc *feature)
+{
+	int index = ls_feature_index(feature->bit);
+
+	if (index < 0 || index >= LS_FEAT_COUNT)
+		return;
+
+	acer->caps.state[index] = LS_PROBE_UNSUPPORTED;
+	acer->caps.last_err[index] = -EOPNOTSUPP;
+	acer->caps.read_ok |= feature->bit;
+	acer->caps.available &= ~feature->bit;
+
+	dev_warn(acer->parent,
+		 "feature %s: firmware reports support, denied by the model quirk\n",
+		 feature->name);
+}
+
+/*
  * A feature whose declared endpoints are missing cannot be probed. This is
  * different from a probe failure: the hardware may exist, but this boot has
  * no way to talk to it. Record it as deferred and disable only this feature.
@@ -695,8 +718,8 @@ static void ls_defer_missing_features(struct acer_wmi *acer)
 	unsigned long missing;
 	unsigned int i;
 
-	acer->caps.endpoints_required = ls_required_endpoints(
-		~(acer->caps.disabled | acer->caps.denied));
+	acer->caps.endpoints_required =
+		ls_required_endpoints(~acer->caps.disabled);
 	missing = acer->caps.endpoints_required & ~acer->caps.endpoints_present;
 	if (!missing)
 		return;
@@ -712,8 +735,6 @@ static void ls_defer_missing_features(struct acer_wmi *acer)
 		unsigned long feature_missing;
 
 		if (acer->caps.disabled & feature->bit)
-			continue;
-		if (acer->caps.denied & feature->bit)
 			continue;
 
 		feature_missing = feature->requires & missing;
@@ -949,14 +970,6 @@ static void acer_wmi_verify_features(struct acer_wmi *acer)
 		if (acer->caps.disabled & feature->bit)
 			continue;
 
-		if (acer->quirks->deny & feature->bit) {
-			ls_verify_record(acer, feature, -EOPNOTSUPP);
-			dev_warn(acer->parent,
-				 "feature %s: denied by the model quirk\n",
-				 feature->name);
-			continue;
-		}
-
 		/* Already recorded as deferred by the endpoint check. */
 		if (feature->requires & ~acer->caps.endpoints_present)
 			continue;
@@ -981,7 +994,10 @@ static void acer_wmi_verify_features(struct acer_wmi *acer)
 			}
 		}
 
-		ls_verify_record(acer, feature, err);
+		if (!err && (acer->quirks->deny & feature->bit))
+			ls_deny_record(acer, feature);
+		else
+			ls_verify_record(acer, feature, err);
 	}
 
 	acer->caps.available &= ~acer->caps.disabled;
