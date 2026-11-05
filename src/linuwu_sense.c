@@ -2423,6 +2423,18 @@ static const char *ls_probe_state_name(const struct acer_wmi *acer, u32 bit)
 	}
 }
 
+static const char *ls_write_state_name(const struct acer_wmi *acer, u32 bit)
+{
+	/* fan_tach is the only feature without a write path. */
+	if (bit == LS_FEAT_FAN_TACH)
+		return "-";
+	if (acer->caps.write_ok & bit)
+		return "yes";
+	if (acer->caps.available & bit)
+		return "unver";
+	return "no";
+}
+
 static void ls_evidence_show(struct seq_file *m, const struct acer_wmi *acer,
 			     const struct linuwu_sense_feature_desc *feature)
 {
@@ -2467,7 +2479,7 @@ static void ls_caps_show_one(struct seq_file *m, const struct acer_wmi *acer)
 	seq_printf(m, "profiles:   0x%016lx\n", acer->caps.evidence.profiles);
 	seq_puts(m, "\n");
 
-	seq_printf(m, "%-20s %-8s %-12s %-4s %-4s %-5s %-7s %s\n",
+	seq_printf(m, "%-20s %-9s %-12s %-4s %-5s %-5s %-7s %s\n",
 		   "feature", "requires", "state", "read", "write", "err",
 		   "publish", "evidence");
 	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++) {
@@ -2479,11 +2491,11 @@ static void ls_caps_show_one(struct seq_file *m, const struct acer_wmi *acer)
 		if (index >= 0 && index < LS_FEAT_COUNT)
 			err = acer->caps.last_err[index];
 
-		seq_printf(m, "%-20s 0x%-6lx %-12s %-4s %-4s %-5d %-7d ",
+		seq_printf(m, "%-20s 0x%-6lx %-12s %-4s %-5s %-5d %-7d ",
 			   feature->name, feature->requires,
 			   ls_probe_state_name(acer, feature->bit),
 			   (acer->caps.read_ok & feature->bit) ? "yes" : "no",
-			   (acer->caps.write_ok & feature->bit) ? "yes" : "no",
+			   ls_write_state_name(acer, feature->bit),
 			   err,
 			   (index >= 0 && index < LS_FEAT_COUNT) ?
 				   acer->caps.publish_err[index] :

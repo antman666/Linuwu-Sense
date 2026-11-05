@@ -108,7 +108,7 @@ read and write halves are tracked separately. `fan_control` additionally
 needs a successful real fan-mode write during setup, so a firmware that can be
 read but not written is not exposed. For the other writable sysfs controls a
 successful first write is recorded in the debugfs state; before that they are
-shown as `write=no`.
+shown as `write=unver`.
 
 A missing WMI endpoint no longer disables the whole driver. Only the features
 that declare the missing endpoint are deferred; the remaining features and the
