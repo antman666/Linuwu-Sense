@@ -112,7 +112,10 @@ shown as `write=unver`.
 
 A missing WMI endpoint no longer disables the whole driver. Only the features
 that declare the missing endpoint are deferred; the remaining features and the
-hotkey input keep working.
+hotkey input keep working. A runtime endpoint removal does not re-run the
+verification: operations that need the removed endpoint fail with `-ENODEV`,
+the verified feature set stays unchanged, and the debugfs dump shows both the
+setup and the live endpoint masks.
 
 > **Behaviour change:** features that used to be off by default can now be
 > enabled automatically when the firmware reports them, and a feature that

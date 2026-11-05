@@ -2462,7 +2462,17 @@ static void ls_evidence_show(struct seq_file *m, const struct acer_wmi *acer,
 static void ls_caps_show_one(struct seq_file *m, const struct acer_wmi *acer)
 {
 	const char *model = dmi_get_system_info(DMI_PRODUCT_NAME);
+	unsigned long live;
 	unsigned int i;
+
+	/*
+	 * The stored bitmap is the setup-time snapshot. Report the current
+	 * endpoint set too, so a runtime unbind is visible in the dump even
+	 * though the verified feature set intentionally stays unchanged.
+	 */
+	mutex_lock(&acer->lock);
+	live = ls_endpoints_present(acer);
+	mutex_unlock(&acer->lock);
 
 	seq_printf(m, "device: %s\n",
 		   acer->parent ? dev_name(acer->parent) : "unknown");
@@ -2471,9 +2481,10 @@ static void ls_caps_show_one(struct seq_file *m, const struct acer_wmi *acer)
 	seq_printf(m, "denied:     0x%08x\n", acer->caps.denied);
 	seq_printf(m, "available:  0x%08x\n", acer->caps.available);
 	seq_printf(m, "effective:  0x%08x\n", acer->caps.effective);
-	seq_printf(m, "endpoints:  present 0x%lx, required 0x%lx, missing 0x%lx\n",
-		   acer->caps.endpoints_present, acer->caps.endpoints_required,
-		   acer->caps.endpoints_required & ~acer->caps.endpoints_present);
+	seq_printf(m, "endpoints:  setup 0x%lx, live 0x%lx, required 0x%lx, missing 0x%lx\n",
+		   acer->caps.endpoints_present, live,
+		   acer->caps.endpoints_required,
+		   acer->caps.endpoints_required & ~live);
 	seq_printf(m, "sensors:    0x%016llx\n",
 		   (unsigned long long)acer->caps.evidence.sensors);
 	seq_printf(m, "profiles:   0x%016lx\n", acer->caps.evidence.profiles);
