@@ -519,34 +519,6 @@ static void ls_update_capability(struct acer_wmi *acer)
 }
 
 /*
- * Disable a feature whose verification or firmware handshake failed after the
- * feature set was built. The evidence is updated as well: the feature must not
- * look available in debugfs when the driver could not use it.
- */
-static void ls_disable_feature(struct acer_wmi *acer, u32 feature, int err)
-{
-	int index = ls_feature_index(feature);
-
-	acer->caps.available &= ~feature;
-	acer->caps.effective &= ~feature;
-
-	if (feature == LS_FEAT_FAN_CONTROL) {
-		acer->cpu_fan_control = false;
-		acer->gpu_fan_control = false;
-	}
-
-	if (index >= 0 && index < LS_FEAT_COUNT) {
-		acer->caps.last_err[index] = err;
-		if (err == -EIO || err == -ETIMEDOUT || err == -EAGAIN)
-			acer->caps.state[index] = LS_PROBE_INCONCLUSIVE;
-		else
-			acer->caps.state[index] = LS_PROBE_UNSUPPORTED;
-	}
-
-	ls_update_capability(acer);
-}
-
-/*
  * A frontend failed to register. The hardware may still support the feature,
  * so keep the verification result and record the publish failure separately.
  */
@@ -1031,7 +1003,8 @@ static bool acer_turbo_fan_supported(struct acer_wmi *acer)
  * report success without changing the mode on some firmware.
  *
  * @written, when non-NULL, receives the bitmap of the channels whose write
- * succeeded. This is the write-side evidence used by the setup path.
+ * succeeded. The setup path records it as write-side evidence, but the
+ * feature stays available even when no channel accepts the initial write.
  */
 static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo,
 					  u8 *written)
@@ -1657,25 +1630,22 @@ static int acer_platform_probe(struct platform_device *pdev)
 		acer->fan_control_stopped = false;
 		err = acer_set_turbo_fan_mode_locked(acer, false, &written);
 		acer->caps.evidence.fan_write = written;
-		if (written) {
+		if (written)
 			acer->caps.write_ok |= LS_FEAT_FAN_CONTROL;
-			acer->cpu_fan_control =
-				!!(written & BIT(LINUWU_SENSE_FAN_CPU));
-			acer->gpu_fan_control =
-				!!(written & BIT(LINUWU_SENSE_FAN_GPU));
-		}
 		mutex_unlock(&acer->lock);
 
-		if (!written) {
+		/*
+		 * The read verification is enough to expose fan control. The
+		 * initial mode write is only an attempt to put the fans into a
+		 * known state; if it fails, leave the feature available and let
+		 * a later write report the firmware error. The controllable
+		 * channels stay the ones the read verification found, not the
+		 * subset that happened to accept this write.
+		 */
+		if (err)
 			dev_warn(&pdev->dev,
-				 "no fan accepted the initial mode write: %d\n",
+				 "fan mode initialization failed (%d), fan control remains available and writes will report errors\n",
 				 err);
-			ls_disable_feature(acer, LS_FEAT_FAN_CONTROL,
-					   err ? err : -EOPNOTSUPP);
-		} else if (err) {
-			dev_warn(&pdev->dev,
-				 "fan mode partially initialized: %d\n", err);
-		}
 	}
 
 	if (has_cap(acer, ACER_CAP_PREDATOR_SENSE)) {
@@ -2459,7 +2429,7 @@ static void ls_evidence_show(struct seq_file *m, const struct acer_wmi *acer,
 	}
 }
 
-static void ls_caps_show_one(struct seq_file *m, const struct acer_wmi *acer)
+static void ls_caps_show_one(struct seq_file *m, struct acer_wmi *acer)
 {
 	const char *model = dmi_get_system_info(DMI_PRODUCT_NAME);
 	unsigned long live;
