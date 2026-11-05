@@ -13,8 +13,10 @@
  *  - pwm[1-2]_enable: 0 = full speed, 1 = manual (pwmN), 2 = automatic,
  *    matching the Acer fan behavior modes
  *
- *  The firmware does not report the manual duty cycle back, so pwm[1-2] read
- *  the last duty cycle written through the hwmon interface.
+ *  The firmware keeps the last manual duty cycle in a register which can be
+ *  read back, but the value is only meaningful while the fan is in manual
+ *  mode. pwm[1-2] therefore report that value in manual mode and return
+ *  -ENODATA in automatic or full-speed mode, where the firmware owns the PWM.
  */
 
 #include <linux/device.h>
@@ -96,10 +98,35 @@ static enum linuwu_sense_fan acer_wmi_hwmon_channel_to_fan(int channel)
 static int acer_wmi_hwmon_pwm_read(struct acer_wmi *acer, int channel,
 				   long *val)
 {
-	if (channel == 0)
-		*val = DIV_ROUND_CLOSEST(acer->cpu_fan_speed * 255, 100);
-	else
-		*val = DIV_ROUND_CLOSEST(acer->gpu_fan_speed * 255, 100);
+	enum linuwu_sense_fan_mode mode;
+	enum linuwu_sense_fan fan;
+	struct wmi_device *wdev;
+	u8 speed;
+	int ret;
+
+	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
+	if (!wdev)
+		return -ENODEV;
+
+	fan = acer_wmi_hwmon_channel_to_fan(channel);
+
+	ret = linuwu_sense_fan_get_mode(wdev, fan, &mode);
+	if (ret)
+		return ret;
+
+	/*
+	 * The firmware keeps returning the last manual duty in automatic and
+	 * turbo mode. It does not describe the PWM output the firmware
+	 * generates in those modes, so do not report it.
+	 */
+	if (mode != LINUWU_SENSE_FAN_MODE_CUSTOM)
+		return -ENODATA;
+
+	ret = linuwu_sense_fan_get_speed(wdev, fan, &speed);
+	if (ret)
+		return ret;
+
+	*val = DIV_ROUND_CLOSEST(speed * 255, 100);
 
 	return 0;
 }
@@ -187,13 +214,16 @@ static int acer_wmi_hwmon_read(struct device *dev, enum hwmon_sensor_types type,
 	return 0;
 }
 
-static int acer_wmi_hwmon_pwm_write(struct acer_wmi *acer, int channel,
+static int acer_wmi_hwmon_pwm_write(struct device *dev,
+				    struct acer_wmi *acer, int channel,
 				    long val)
 {
+	enum linuwu_sense_fan_mode prev_mode;
 	enum linuwu_sense_fan fan = acer_wmi_hwmon_channel_to_fan(channel);
 	struct wmi_device *wdev;
 	bool cpu, gpu;
 	int percent;
+	int restore;
 	int ret;
 
 	if (val < 0 || val > 255)
@@ -208,20 +238,35 @@ static int acer_wmi_hwmon_pwm_write(struct acer_wmi *acer, int channel,
 	cpu = fan == LINUWU_SENSE_FAN_CPU;
 	gpu = !cpu;
 
-	/* A duty cycle only takes effect in manual mode. */
-	ret = linuwu_sense_fan_set_mode(wdev, cpu, gpu,
-					LINUWU_SENSE_FAN_MODE_CUSTOM);
+	ret = linuwu_sense_fan_get_mode(wdev, fan, &prev_mode);
 	if (ret)
 		return ret;
+
+	/*
+	 * A duty cycle only takes effect in manual mode. method 16 alone only
+	 * updates the firmware's manual duty register and leaves the behavior
+	 * mode untouched, so switch to manual first unless it is already set.
+	 */
+	if (prev_mode != LINUWU_SENSE_FAN_MODE_CUSTOM) {
+		ret = linuwu_sense_fan_set_mode(wdev, cpu, gpu,
+						LINUWU_SENSE_FAN_MODE_CUSTOM);
+		if (ret)
+			return ret;
+	}
 
 	ret = linuwu_sense_fan_set_speed(wdev, fan, percent);
-	if (ret)
-		return ret;
+	if (ret) {
+		if (prev_mode == LINUWU_SENSE_FAN_MODE_CUSTOM)
+			return ret;
 
-	if (cpu)
-		acer->cpu_fan_speed = percent;
-	else
-		acer->gpu_fan_speed = percent;
+		restore = linuwu_sense_fan_set_mode(wdev, cpu, gpu, prev_mode);
+		if (restore)
+			dev_warn(dev,
+				 "failed to restore fan mode %d after pwm error %d: %d\n",
+				 prev_mode, ret, restore);
+
+		return ret;
+	}
 
 	return 0;
 }
@@ -274,8 +319,13 @@ static int acer_wmi_hwmon_write(struct device *dev,
 		return -EOPNOTSUPP;
 
 	mutex_lock(&acer->lock);
+	if (acer->fan_control_stopped) {
+		mutex_unlock(&acer->lock);
+		return -ENODEV;
+	}
+
 	if (attr == hwmon_pwm_input)
-		ret = acer_wmi_hwmon_pwm_write(acer, channel, val);
+		ret = acer_wmi_hwmon_pwm_write(dev, acer, channel, val);
 	else if (attr == hwmon_pwm_enable)
 		ret = acer_wmi_hwmon_pwm_enable_write(acer, channel, val);
 	else
@@ -304,6 +354,40 @@ static const struct hwmon_chip_info acer_wmi_hwmon_chip_info = {
 	.info = acer_wmi_hwmon_info,
 };
 
+/*
+ * The pwm read path depends on the firmware's manual duty readback. Probe it
+ * once so a machine which implements the fan control commands but not the
+ * readback is visible in the log instead of failing every pwm read silently.
+ */
+static void acer_wmi_hwmon_check_pwm_read(struct acer_wmi *acer,
+					  struct device *dev)
+{
+	struct wmi_device *wdev;
+	u8 speed;
+	bool ok = false;
+
+	if (!acer->cpu_fan_control && !acer->gpu_fan_control)
+		return;
+
+	mutex_lock(&acer->lock);
+	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
+	if (wdev) {
+		if (acer->cpu_fan_control &&
+		    !linuwu_sense_fan_get_speed(wdev, LINUWU_SENSE_FAN_CPU,
+						&speed))
+			ok = true;
+		if (!ok && acer->gpu_fan_control &&
+		    !linuwu_sense_fan_get_speed(wdev, LINUWU_SENSE_FAN_GPU,
+						&speed))
+			ok = true;
+	}
+	mutex_unlock(&acer->lock);
+
+	if (!ok)
+		dev_warn(dev,
+			 "fan speed readback unavailable, pwm reads will fail\n");
+}
+
 int acer_wmi_hwmon_init(struct acer_wmi *acer, struct device *dev)
 {
 	struct acer_wmi_hwmon_data *hwmon_data;
@@ -328,6 +412,9 @@ int acer_wmi_hwmon_init(struct acer_wmi *acer, struct device *dev)
 			hwmon_data->supported_sensors = 0;
 		}
 	}
+
+	if (acer->capability & ACER_CAP_TURBO_FAN)
+		acer_wmi_hwmon_check_pwm_read(acer, dev);
 
 	/* Nothing to expose when neither sensors nor fan control exist. */
 	if (!hwmon_data->supported_sensors &&

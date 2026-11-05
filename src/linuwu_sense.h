@@ -235,10 +235,10 @@ struct acer_wmi {
 	bool gpu_fan_control;
 
 	/*
-	 * Protects the endpoint claims in @wdevs[] and the cached fan speed
-	 * pair, and serializes the Acer WMI method invocations issued by the
-	 * control surface, the WMI event path and the subsystem frontends.
-	 * May be held across ACPI/WMI operations, so it must stay a mutex.
+	 * Protects the endpoint claims in @wdevs[] and @fan_control_stopped,
+	 * and serializes the Acer WMI method invocations issued by the control
+	 * surface, the WMI event path and the subsystem frontends. May be held
+	 * across ACPI/WMI operations, so it must stay a mutex.
 	 *
 	 * Lock order: acer_wmi_instances_lock -> @event_lock -> @lock.
 	 */
@@ -252,8 +252,12 @@ struct acer_wmi {
 	struct mutex event_lock;
 	bool ready;
 
-	int cpu_fan_speed;
-	int gpu_fan_speed;
+	/*
+	 * Set after the fans were handed back to the firmware while the logical
+	 * device is removed. Fan control writes which acquire @lock afterwards
+	 * must fail instead of entering manual mode again. Protected by @lock.
+	 */
+	bool fan_control_stopped;
 };
 
 /*

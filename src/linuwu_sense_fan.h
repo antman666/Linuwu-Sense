@@ -33,4 +33,12 @@ int linuwu_sense_fan_get_mode(struct wmi_device *wdev,
 int linuwu_sense_fan_set_speed(struct wmi_device *wdev,
 			       enum linuwu_sense_fan fan, int percentage);
 
+/*
+ * Read the manual duty cycle stored by the firmware. This is not a live PWM
+ * reading: automatic and turbo mode keep returning the last manual value, so
+ * the caller must only use it in manual mode.
+ */
+int linuwu_sense_fan_get_speed(struct wmi_device *wdev,
+			       enum linuwu_sense_fan fan, u8 *percentage);
+
 #endif /* LINUWU_SENSE_FAN_H */

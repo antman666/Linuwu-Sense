@@ -10,6 +10,7 @@
 #define ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID 14
 #define ACER_WMID_GET_GAMING_FAN_BEHAVIOR_METHODID 15
 #define ACER_WMID_SET_GAMING_FAN_SPEED_METHODID 16
+#define ACER_WMID_GET_GAMING_FAN_SPEED_METHODID 17
 
 #define ACER_GAMING_FAN_BEHAVIOR_CPU BIT(0)
 #define ACER_GAMING_FAN_BEHAVIOR_GPU BIT(3)
@@ -197,4 +198,54 @@ int linuwu_sense_fan_set_speed(struct wmi_device *wdev,
 	default:
 		return -EIO;
 	}
+}
+
+int linuwu_sense_fan_get_speed(struct wmi_device *wdev,
+			       enum linuwu_sense_fan fan, u8 *percentage)
+{
+	struct wmi_buffer input = {};
+	struct wmi_buffer output = {};
+	u32 input_value;
+	u64 result;
+	u8 fan_id;
+	int err;
+
+	if (!wdev)
+		return -ENODEV;
+
+	if (!percentage)
+		return -EINVAL;
+
+	switch (fan) {
+	case LINUWU_SENSE_FAN_CPU:
+		fan_id = ACER_GAMING_FAN_SPEED_CPU_ID;
+		break;
+	case LINUWU_SENSE_FAN_GPU:
+		fan_id = ACER_GAMING_FAN_SPEED_GPU_ID;
+		break;
+	default:
+		return -EINVAL;
+	}
+
+	input_value = FIELD_PREP(ACER_GAMING_FAN_SPEED_ID_MASK, fan_id);
+	input.length = sizeof(input_value);
+	input.data = &input_value;
+
+	err = wmidev_invoke_method(wdev, 0,
+				   ACER_WMID_GET_GAMING_FAN_SPEED_METHODID,
+				   &input, &output, sizeof(result));
+	if (err)
+		return err;
+
+	result = get_unaligned_le64(output.data);
+	kfree(output.data);
+
+	if (FIELD_GET(ACER_GAMING_FAN_SPEED_STATUS_MASK, result))
+		return -EIO;
+
+	*percentage = FIELD_GET(ACER_GAMING_FAN_SPEED_VALUE_MASK, result);
+	if (*percentage > 100)
+		return -EIO;
+
+	return 0;
 }

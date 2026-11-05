@@ -228,8 +228,10 @@ fan, temperatures are `temp1` (CPU), `temp2` (GPU) and `temp3` (external):
 
 - **`fan[12]_input`** – current fan speed in RPM (read only).
 - **`temp[123]_input`** – current temperature in millidegrees (read only).
-- **`pwm[12]`** – fan duty cycle, 0-255. Writing a value switches the fan to
-  manual mode and applies the scaled duty cycle.
+- **`pwm[12]`** – manual fan duty cycle, 0-255. Writing a value switches the
+  fan to manual mode and applies the scaled duty cycle. The value can only be
+  read back in manual mode; in automatic or full-speed mode the firmware does
+  not expose the current duty, so reading it fails with `ENODATA`.
 - **`pwm[12]_enable`** – fan control mode: **0** = full speed, **1** = manual
   (`pwmN`), **2** = automatic.
 
@@ -241,6 +243,9 @@ Example (set the CPU fan to about 50% and the GPU fan to about 70%, assuming
 `echo 128 | sudo tee /sys/class/hwmon/hwmon3/pwm1`
 
 `echo 178 | sudo tee /sys/class/hwmon/hwmon3/pwm2`
+
+Unloading the driver, or removing the gaming WMI endpoint, returns every
+controlled fan to automatic mode.
 
 ---
 

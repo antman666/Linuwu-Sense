@@ -793,6 +793,9 @@ static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
 
 	if (!acer_turbo_fan_supported(acer))
 		return -EOPNOTSUPP;
+	if (acer->fan_control_stopped)
+		return -ENODEV;
+
 	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	if (!wdev)
 		return -ENODEV;
@@ -805,6 +808,46 @@ static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
 		return err;
 
 	return 0;
+}
+
+/*
+ * Hand every controlled fan back to the firmware. The caller must hold
+ * acer->lock.
+ */
+static int acer_wmi_restore_fan_mode_locked(struct acer_wmi *acer)
+{
+	struct wmi_device *wdev;
+	int err = 0;
+	int ret;
+
+	lockdep_assert_held(&acer->lock);
+
+	if (!acer_turbo_fan_supported(acer))
+		return 0;
+
+	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
+	if (!wdev)
+		return -ENODEV;
+
+	/*
+	 * Set the fans individually, matching the pwm_enable write path. A
+	 * single behavior command covering both fans has been observed to
+	 * report success without changing the mode on some firmware.
+	 */
+	if (acer->cpu_fan_control) {
+		ret = linuwu_sense_fan_set_mode(wdev, true, false,
+						LINUWU_SENSE_FAN_MODE_AUTO);
+		if (ret)
+			err = ret;
+	}
+	if (acer->gpu_fan_control) {
+		ret = linuwu_sense_fan_set_mode(wdev, false, true,
+						LINUWU_SENSE_FAN_MODE_AUTO);
+		if (ret && !err)
+			err = ret;
+	}
+
+	return err;
 }
 
 static void acer_wmi_notify(struct wmi_device *wdev,
@@ -1326,6 +1369,7 @@ static int acer_platform_probe(struct platform_device *pdev)
 
 	if (has_cap(acer, ACER_CAP_TURBO_FAN)) {
 		mutex_lock(&acer->lock);
+		acer->fan_control_stopped = false;
 		err = acer_set_turbo_fan_mode_locked(acer, false);
 		mutex_unlock(&acer->lock);
 		if (err && err != -EOPNOTSUPP)
@@ -1404,6 +1448,7 @@ static int acer_platform_probe(struct platform_device *pdev)
 static void acer_platform_remove(struct platform_device *pdev)
 {
 	struct acer_wmi *acer = platform_get_drvdata(pdev);
+	int err;
 
 	if (!acer)
 		return;
@@ -1417,6 +1462,20 @@ static void acer_platform_remove(struct platform_device *pdev)
 	mutex_lock(&acer->event_lock);
 	acer->ready = false;
 	mutex_unlock(&acer->event_lock);
+
+	/*
+	 * Hand the fans back to the firmware before the frontends disappear.
+	 * The hwmon device is devres-managed and stays live until after this
+	 * callback returned, so fan_control_stopped closes the window in which
+	 * a concurrent hwmon write could enter manual mode again.
+	 */
+	mutex_lock(&acer->lock);
+	err = acer_wmi_restore_fan_mode_locked(acer);
+	acer->fan_control_stopped = true;
+	mutex_unlock(&acer->lock);
+
+	if (err && err != -ENODEV)
+		dev_warn(&pdev->dev, "unable to restore fan mode: %d\n", err);
 
 	/*
 	 * All remaining resources (input, hwmon, platform profile, LED
@@ -1857,6 +1916,7 @@ static void acer_wmi_wdev_remove(struct wmi_device *wdev)
 {
 	struct acer_wmi_wdev *wdev_data = dev_get_drvdata(&wdev->dev);
 	struct acer_wmi *acer;
+	int err = 0;
 
 	if (!wdev_data)
 		return;
@@ -1873,8 +1933,13 @@ static void acer_wmi_wdev_remove(struct wmi_device *wdev)
 	 * function is synchronized with the notify path by the WMI core.
 	 */
 	mutex_lock(&acer->lock);
+	if (wdev_data->guid == ACER_WMI_GUID_WMID_GAMING)
+		err = acer_wmi_restore_fan_mode_locked(acer);
 	acer_wmi_endpoint_release(acer, wdev_data->guid, wdev);
 	mutex_unlock(&acer->lock);
+
+	if (err && err != -ENODEV)
+		dev_warn(&wdev->dev, "unable to restore fan mode: %d\n", err);
 
 	/* Drop the instance once it can never be referenced again. */
 	acer_wmi_instance_drop(acer);
