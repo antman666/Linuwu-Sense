@@ -37,10 +37,10 @@ struct wmi_device;
 #define ACER_CAP_NITRO_SENSE_V4 BIT(14)
 
 /*
- * Independently switchable hardware features. The DMI model table provides
- * the allowed set (the hard boundary) and the default set (the historical
- * behaviour); the feature= module parameter can only move bits inside the
- * allowed set, and runtime probes can only take bits away.
+ * Independently verified hardware features. feature=<name>.enable=0 is an
+ * opt-out; otherwise the evidence collected from the firmware at load time
+ * decides whether a feature is available. The DMI table only selects the
+ * supported model and its interface family.
  */
 #define LS_FEAT_FAN_TACH BIT(0)
 #define LS_FEAT_FAN_CONTROL BIT(1)
@@ -63,24 +63,49 @@ enum linuwu_sense_probe_state {
 };
 
 /*
+ * Evidence collected by the verification of one feature. A feature is only
+ * available when its verification produced a definite positive result; a
+ * transport error is not evidence either way and leaves the feature disabled.
+ *
+ * The read and write halves are kept separate on purpose: a readable fan mode
+ * does not prove that the mode can be written, and a successful real write is
+ * recorded independently of the read probe.
+ */
+struct linuwu_sense_evidence {
+	u64 sensors;          /* fan_tach: supported sensor bitmap */
+	unsigned long profiles; /* thermal_profile: supported choices */
+	u8 fan_read;          /* fan_control: channels with a valid mode read */
+	u8 fan_write;         /* fan_control: channels with a verified write */
+	u8 fan_pwm_read;      /* fan_control: channels with manual duty readback */
+};
+
+/*
  * Per feature state of one instance. The feature bit index is used as array
  * index (LS_FEAT_FAN_TACH is index 0, ...).
  */
 struct linuwu_sense_caps {
-	u32 allowed;
-	u32 default_on;
-	u32 requested;
+	/* Model quirk vetoes, for diagnostics only. */
+	u32 denied;
+	/* Explicitly disabled through feature=<name>.enable=0. */
+	u32 disabled;
+	/* Features whose verification produced a definite positive result. */
+	u32 available;
+	/* available & ~disabled, the set the frontends may publish. */
 	u32 effective;
+	/* Features with valid read evidence and with an observed real write. */
+	u32 read_ok;
+	u32 write_ok;
+
 	u8 state[LS_FEAT_COUNT];
 	s16 last_err[LS_FEAT_COUNT];
-	u64 sensors;
-	unsigned long profiles;
+	s16 publish_err[LS_FEAT_COUNT];
+	struct linuwu_sense_evidence evidence;
 
 	/*
 	 * The endpoints that were claimed when the instance was set up and
-	 * the endpoints the requested features declare as required. The
+	 * the endpoints the enabled features declare as required. The
 	 * difference decides which features are deferred instead of being
-	 * probed.
+	 * verified.
 	 */
 	unsigned long endpoints_present;
 	unsigned long endpoints_required;
@@ -96,8 +121,7 @@ struct linuwu_sense_keyboard_options {
 };
 
 struct linuwu_sense_config {
-	u32 requested;
-	u32 enabled;
+	/* Features explicitly disabled through feature=<name>.enable=0. */
 	u32 disabled;
 	struct linuwu_sense_keyboard_options keyboard;
 };
@@ -190,7 +214,7 @@ struct acer_wmi {
 	 * Number of distinct Acer GUIDs exposed by the WMI bus device this
 	 * instance belongs to. This is the size of the endpoint topology, not
 	 * a requirement: the instance is set up with whatever subset the
-	 * requested features need. Captured when the instance is created.
+	 * enabled features need. Captured when the instance is created.
 	 * Protected by acer_wmi_instances_lock.
 	 */
 	unsigned int endpoints_expected;
@@ -213,11 +237,11 @@ struct acer_wmi {
 	unsigned int wdev_count;
 
 	/*
-	 * Aggregate setup state. Runs from COLLECTING to ACTIVE when the
-	 * complete endpoint set was set up, or to FAILED when the endpoint
-	 * set or the setup of the logical device failed. FAILED is terminal:
-	 * once every expected probe has run no later probe can repair the set.
-	 * Protected by acer_wmi_instances_lock.
+	 * Aggregate setup state. Runs from COLLECTING to ACTIVE once the
+	 * endpoint set is final and the logical device was set up, or to
+	 * FAILED when the setup of the logical device failed. FAILED is
+	 * terminal: once every expected probe has run no later probe can
+	 * repair the set. Protected by acer_wmi_instances_lock.
 	 */
 	enum acer_wmi_state state;
 
@@ -228,7 +252,10 @@ struct acer_wmi {
 	 */
 	bool platform_probe_ok;
 
-	/* The capabilities this interface provides */
+	/*
+	 * Capabilities derived from the effective feature set, plus the
+	 * interface family selected by the quirks.
+	 */
 	u32 capability;
 
 	/* The model specific quirks which matched this machine */
@@ -237,7 +264,7 @@ struct acer_wmi {
 	/* Static load time feature configuration (feature= and options=) */
 	const struct linuwu_sense_config *config;
 
-	/* DMI boundary, defaults, requested and effective feature sets */
+	/* Disabled, available, effective and evidence state */
 	struct linuwu_sense_caps caps;
 
 	/* Fans that are usable for control on this instance */

@@ -11,30 +11,22 @@
 #include "linuwu_sense_quirks.h"
 
 static const struct linuwu_sense_quirks quirk_acer_predator_ph315_53 = {
-	.cpu_fans = 1,
-	.gpu_fans = 1,
 };
 
 static const struct linuwu_sense_quirks quirk_acer_predator_phn16_71 = {
-	.cpu_fans = 1,
-	.gpu_fans = 1,
 	.predator_v4 = 1,
-	.four_zone_kb = 1,
 };
 
 static const struct linuwu_sense_quirks quirk_acer_predator_phn16_72 = {
 	.predator_v4 = 1,
-	.four_zone_kb = 1,
 };
 
 static const struct linuwu_sense_quirks quirk_acer_nitro_an16_41 = {
 	.nitro_v4 = 1,
-	.four_zone_kb = 1,
 };
 
 static const struct linuwu_sense_quirks quirk_acer_nitro_an16_42 = {
 	.nitro_v4 = 1,
-	.four_zone_kb = 1,
 };
 
 static const struct linuwu_sense_quirks quirk_acer_nitro_anv16_41 = {
@@ -43,7 +35,6 @@ static const struct linuwu_sense_quirks quirk_acer_nitro_anv16_41 = {
 
 static const struct linuwu_sense_quirks quirk_acer_nitro_an16_43 = {
 	.nitro_v4 = 1,
-	.four_zone_kb = 1,
 };
 
 static const struct linuwu_sense_quirks quirk_acer_nitro_legacy = {
@@ -52,7 +43,6 @@ static const struct linuwu_sense_quirks quirk_acer_nitro_legacy = {
 
 static const struct linuwu_sense_quirks quirk_acer_nitro_an515_58 = {
 	.nitro_v4 = 1,
-	.four_zone_kb = 1,
 };
 
 static const struct linuwu_sense_quirks quirk_acer_nitro = {

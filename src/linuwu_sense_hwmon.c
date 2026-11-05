@@ -108,6 +108,14 @@ static int acer_wmi_hwmon_pwm_read(struct acer_wmi *acer, int channel,
 	if (!wdev)
 		return -ENODEV;
 
+	/*
+	 * The readback is a separate read capability collected by the
+	 * fan_control verification. Do not issue a WMI call on every read for
+	 * a firmware that does not implement method 17.
+	 */
+	if (!(acer->caps.evidence.fan_pwm_read & BIT(channel)))
+		return -ENODATA;
+
 	fan = acer_wmi_hwmon_channel_to_fan(channel);
 
 	ret = linuwu_sense_fan_get_mode(wdev, fan, &mode);
@@ -268,6 +276,10 @@ static int acer_wmi_hwmon_pwm_write(struct device *dev,
 		return ret;
 	}
 
+	/* A real write is the only proof that this channel is writable. */
+	acer->caps.evidence.fan_write |= BIT(channel);
+	acer->caps.write_ok |= LS_FEAT_FAN_CONTROL;
+
 	return 0;
 }
 
@@ -277,6 +289,7 @@ static int acer_wmi_hwmon_pwm_enable_write(struct acer_wmi *acer, int channel,
 	enum linuwu_sense_fan_mode mode;
 	struct wmi_device *wdev;
 	bool cpu, gpu;
+	int ret;
 
 	switch (val) {
 	case 0:
@@ -299,7 +312,13 @@ static int acer_wmi_hwmon_pwm_enable_write(struct acer_wmi *acer, int channel,
 	cpu = channel == 0;
 	gpu = !cpu;
 
-	return linuwu_sense_fan_set_mode(wdev, cpu, gpu, mode);
+	ret = linuwu_sense_fan_set_mode(wdev, cpu, gpu, mode);
+	if (!ret) {
+		acer->caps.evidence.fan_write |= BIT(channel);
+		acer->caps.write_ok |= LS_FEAT_FAN_CONTROL;
+	}
+
+	return ret;
 }
 
 static int acer_wmi_hwmon_write(struct device *dev,
@@ -354,45 +373,10 @@ static const struct hwmon_chip_info acer_wmi_hwmon_chip_info = {
 	.info = acer_wmi_hwmon_info,
 };
 
-/*
- * The pwm read path depends on the firmware's manual duty readback. Probe it
- * once so a machine which implements the fan control commands but not the
- * readback is visible in the log instead of failing every pwm read silently.
- */
-static void acer_wmi_hwmon_check_pwm_read(struct acer_wmi *acer,
-					  struct device *dev)
-{
-	struct wmi_device *wdev;
-	u8 speed;
-	bool ok = false;
-
-	if (!acer->cpu_fan_control && !acer->gpu_fan_control)
-		return;
-
-	mutex_lock(&acer->lock);
-	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
-	if (wdev) {
-		if (acer->cpu_fan_control &&
-		    !linuwu_sense_fan_get_speed(wdev, LINUWU_SENSE_FAN_CPU,
-						&speed))
-			ok = true;
-		if (!ok && acer->gpu_fan_control &&
-		    !linuwu_sense_fan_get_speed(wdev, LINUWU_SENSE_FAN_GPU,
-						&speed))
-			ok = true;
-	}
-	mutex_unlock(&acer->lock);
-
-	if (!ok)
-		dev_warn(dev,
-			 "fan speed readback unavailable, pwm reads will fail\n");
-}
-
 int acer_wmi_hwmon_init(struct acer_wmi *acer, struct device *dev)
 {
 	struct acer_wmi_hwmon_data *hwmon_data;
 	struct device *hwmon;
-	int ret;
 
 	hwmon_data = devm_kzalloc(dev, sizeof(*hwmon_data), GFP_KERNEL);
 	if (!hwmon_data)
@@ -400,21 +384,9 @@ int acer_wmi_hwmon_init(struct acer_wmi *acer, struct device *dev)
 
 	hwmon_data->acer = acer;
 
-	if (acer->capability & ACER_CAP_FAN_SPEED_READ) {
-		mutex_lock(&acer->lock);
-		ret = linuwu_sense_gaming_get_supported_sensors(
-			acer, &hwmon_data->supported_sensors);
-		mutex_unlock(&acer->lock);
-		if (ret < 0) {
-			dev_warn(dev,
-				 "sensor discovery failed (%d), no sensor readings\n",
-				 ret);
-			hwmon_data->supported_sensors = 0;
-		}
-	}
-
-	if (acer->capability & ACER_CAP_TURBO_FAN)
-		acer_wmi_hwmon_check_pwm_read(acer, dev);
+	/* The verification already collected the sensor bitmap. */
+	if (acer->capability & ACER_CAP_FAN_SPEED_READ)
+		hwmon_data->supported_sensors = acer->caps.evidence.sensors;
 
 	/* Nothing to expose when neither sensors nor fan control exist. */
 	if (!hwmon_data->supported_sensors &&

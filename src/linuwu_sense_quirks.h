@@ -10,14 +10,24 @@
 /*
  * Model specific static configuration. Entries are selected from the DMI
  * table by linuwu_sense_quirks_match() and never modified afterwards.
+ *
+ * The table no longer describes which features a model supports: features are
+ * discovered from the hardware at load time. What remains are the interface
+ * family (which selects the userspace group and the thermal profile
+ * behaviour) and a negative veto for known firmware bugs.
  */
 struct linuwu_sense_quirks {
-	u8 cpu_fans;
-	u8 gpu_fans;
 	u8 predator_v4;
 	u8 nitro_v4;
 	u8 nitro_sense;
-	u8 four_zone_kb;
+
+	/*
+	 * Features that must not be enabled on this model even when the
+	 * verification says they are present. This is a negative quirk: it
+	 * exists for firmware that reports a capability it does not really
+	 * implement. Leave zero unless a specific model needs the veto.
+	 */
+	u32 deny;
 };
 
 /*

@@ -134,8 +134,6 @@ static const struct linuwu_sense_quirks *acer_wmi_quirks;
 static char feature_param[512];
 static char options_param[512];
 static struct linuwu_sense_config linuwu_sense_config;
-static u32 linuwu_sense_default_on;
-static u32 linuwu_sense_allowed;
 
 struct linuwu_sense_feature_desc {
 	const char *name;
@@ -147,29 +145,94 @@ struct linuwu_sense_feature_desc {
 	 * discovered through the endpoint lookups of the implementation.
 	 */
 	unsigned long requires;
+
+	/*
+	 * Collect the evidence that decides whether the feature is available.
+	 * The callback must be side effect free on the firmware: it may read
+	 * state, but it must not change it. A zero return value with a valid
+	 * payload means available; -EOPNOTSUPP means the firmware definitely
+	 * does not implement the feature; any other error is inconclusive.
+	 */
+	int (*verify)(struct acer_wmi *acer,
+		      struct linuwu_sense_evidence *ev);
 };
 
 #define LS_EP(guid) BIT(guid)
 
+static int ls_probe_fan_tach(struct acer_wmi *acer,
+			     struct linuwu_sense_evidence *ev);
+static int ls_probe_fan_control(struct acer_wmi *acer,
+				struct linuwu_sense_evidence *ev);
+static int ls_probe_thermal_profile(struct acer_wmi *acer,
+				    struct linuwu_sense_evidence *ev);
+static int ls_probe_keyboard_4zone(struct acer_wmi *acer,
+				   struct linuwu_sense_evidence *ev);
+static int ls_probe_battery_health(struct acer_wmi *acer,
+				   struct linuwu_sense_evidence *ev);
+static int ls_probe_usb_charging(struct acer_wmi *acer,
+				 struct linuwu_sense_evidence *ev);
+static int ls_probe_backlight_timeout(struct acer_wmi *acer,
+				      struct linuwu_sense_evidence *ev);
+static int ls_probe_boot_animation(struct acer_wmi *acer,
+				   struct linuwu_sense_evidence *ev);
+static int ls_probe_lcd_override(struct acer_wmi *acer,
+				 struct linuwu_sense_evidence *ev);
+
 static const struct linuwu_sense_feature_desc linuwu_sense_features[] = {
-	{ "fan_tach", LS_FEAT_FAN_TACH,
-	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
-	{ "fan_control", LS_FEAT_FAN_CONTROL,
-	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
-	{ "thermal_profile", LS_FEAT_THERMAL_PROFILE,
-	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
-	{ "keyboard_4zone", LS_FEAT_KEYBOARD_4ZONE,
-	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
-	{ "battery_health", LS_FEAT_BATTERY_HEALTH,
-	  LS_EP(ACER_WMI_GUID_WMID_BATTERY) },
-	{ "usb_charging", LS_FEAT_USB_CHARGING,
-	  LS_EP(ACER_WMI_GUID_WMID_APGE) },
-	{ "backlight_timeout", LS_FEAT_BACKLIGHT_TIMEOUT,
-	  LS_EP(ACER_WMI_GUID_WMID_APGE) },
-	{ "boot_animation", LS_FEAT_BOOT_ANIMATION,
-	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
-	{ "lcd_override", LS_FEAT_LCD_OVERRIDE,
-	  LS_EP(ACER_WMI_GUID_WMID_GAMING) },
+	{
+		.name = "fan_tach",
+		.bit = LS_FEAT_FAN_TACH,
+		.requires = LS_EP(ACER_WMI_GUID_WMID_GAMING),
+		.verify = ls_probe_fan_tach,
+	},
+	{
+		.name = "fan_control",
+		.bit = LS_FEAT_FAN_CONTROL,
+		.requires = LS_EP(ACER_WMI_GUID_WMID_GAMING),
+		.verify = ls_probe_fan_control,
+	},
+	{
+		.name = "thermal_profile",
+		.bit = LS_FEAT_THERMAL_PROFILE,
+		.requires = LS_EP(ACER_WMI_GUID_WMID_GAMING),
+		.verify = ls_probe_thermal_profile,
+	},
+	{
+		.name = "keyboard_4zone",
+		.bit = LS_FEAT_KEYBOARD_4ZONE,
+		.requires = LS_EP(ACER_WMI_GUID_WMID_GAMING),
+		.verify = ls_probe_keyboard_4zone,
+	},
+	{
+		.name = "battery_health",
+		.bit = LS_FEAT_BATTERY_HEALTH,
+		.requires = LS_EP(ACER_WMI_GUID_WMID_BATTERY),
+		.verify = ls_probe_battery_health,
+	},
+	{
+		.name = "usb_charging",
+		.bit = LS_FEAT_USB_CHARGING,
+		.requires = LS_EP(ACER_WMI_GUID_WMID_APGE),
+		.verify = ls_probe_usb_charging,
+	},
+	{
+		.name = "backlight_timeout",
+		.bit = LS_FEAT_BACKLIGHT_TIMEOUT,
+		.requires = LS_EP(ACER_WMI_GUID_WMID_APGE),
+		.verify = ls_probe_backlight_timeout,
+	},
+	{
+		.name = "boot_animation",
+		.bit = LS_FEAT_BOOT_ANIMATION,
+		.requires = LS_EP(ACER_WMI_GUID_WMID_GAMING),
+		.verify = ls_probe_boot_animation,
+	},
+	{
+		.name = "lcd_override",
+		.bit = LS_FEAT_LCD_OVERRIDE,
+		.requires = LS_EP(ACER_WMI_GUID_WMID_GAMING),
+		.verify = ls_probe_lcd_override,
+	},
 };
 
 static const struct linuwu_sense_feature_desc *
@@ -179,18 +242,6 @@ ls_feature_by_name(const char *name)
 
 	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++)
 		if (!strcmp(name, linuwu_sense_features[i].name))
-			return &linuwu_sense_features[i];
-
-	return NULL;
-}
-
-static const struct linuwu_sense_feature_desc *
-ls_feature_by_bit(u32 bit)
-{
-	unsigned int i;
-
-	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++)
-		if (linuwu_sense_features[i].bit == bit)
 			return &linuwu_sense_features[i];
 
 	return NULL;
@@ -254,7 +305,7 @@ static const struct kernel_param_ops feature_param_ops = {
 };
 
 module_param_cb(feature, &feature_param_ops, NULL, 0444);
-MODULE_PARM_DESC(feature, "Feature switches: <feature>.enable=0|1,...");
+MODULE_PARM_DESC(feature, "Feature opt-out: <feature>.enable=0,...");
 
 static int options_param_set(const char *val, const struct kernel_param *kp)
 {
@@ -276,59 +327,6 @@ static const struct kernel_param_ops options_param_ops = {
 module_param_cb(options, &options_param_ops, NULL, 0444);
 MODULE_PARM_DESC(options, "Feature options: <feature>.<option>=<value>,...");
 
-/*
- * Features enabled by the historical behaviour of the matched model. This is
- * the compatibility baseline: without feature= / options= nothing changes.
- */
-static u32 linuwu_sense_default_features(const struct linuwu_sense_quirks *q)
-{
-	u32 features = 0;
-
-	if (q->cpu_fans || q->gpu_fans)
-		features |= LS_FEAT_FAN_CONTROL;
-
-	if (q->predator_v4 || q->nitro_v4 || q->nitro_sense)
-		features |= LS_FEAT_FAN_TACH;
-
-	if (q->predator_v4 || q->nitro_v4 || q->nitro_sense == 1)
-		features |= LS_FEAT_THERMAL_PROFILE;
-
-	if (q->four_zone_kb)
-		features |= LS_FEAT_KEYBOARD_4ZONE;
-
-	if (q->predator_v4 || q->nitro_v4 || q->nitro_sense)
-		features |= LS_FEAT_BATTERY_HEALTH |
-			    LS_FEAT_USB_CHARGING |
-			    LS_FEAT_BACKLIGHT_TIMEOUT;
-
-	if (q->predator_v4 || q->nitro_v4)
-		features |= LS_FEAT_BOOT_ANIMATION |
-			    LS_FEAT_LCD_OVERRIDE;
-
-	return features;
-}
-
-/*
- * Hard boundary of the model. Features outside this mask cannot be enabled by
- * the user and are never probed. The boundary is deliberately wider than the
- * historical default so that a validated feature can be opted in without
- * changing the default behaviour of existing machines.
- */
-static u32 linuwu_sense_allowed_features(const struct linuwu_sense_quirks *q)
-{
-	u32 allowed = linuwu_sense_default_features(q);
-
-	allowed |= LS_FEAT_FAN_TACH | LS_FEAT_FAN_CONTROL |
-		   LS_FEAT_THERMAL_PROFILE | LS_FEAT_KEYBOARD_4ZONE |
-		   LS_FEAT_BATTERY_HEALTH | LS_FEAT_USB_CHARGING |
-		   LS_FEAT_BACKLIGHT_TIMEOUT;
-
-	if (q->predator_v4 || q->nitro_v4)
-		allowed |= LS_FEAT_BOOT_ANIMATION | LS_FEAT_LCD_OVERRIDE;
-
-	return allowed;
-}
-
 static int ls_parse_rgb(const char *value, u32 *rgb)
 {
 	u32 val;
@@ -340,12 +338,17 @@ static int ls_parse_rgb(const char *value, u32 *rgb)
 	return 0;
 }
 
-static void ls_parse_feature_param(u32 default_on, u32 allowed)
+/*
+ * feature= is an opt-out: <feature>.enable=0 excludes a feature from
+ * verification and publication, while .enable=1 (or no token at all) leaves
+ * the decision to the hardware evidence. There is no model boundary and no
+ * historical default set.
+ */
+static void ls_parse_feature_param(void)
 {
 	char buf[sizeof(feature_param)];
 	char *token, *next, *eq, *dot;
 	const struct linuwu_sense_feature_desc *feature;
-	u32 requested = default_on;
 	u8 enable;
 
 	strscpy(buf, feature_param, sizeof(buf));
@@ -379,33 +382,20 @@ static void ls_parse_feature_param(u32 default_on, u32 allowed)
 			continue;
 		}
 
-		if (!(allowed & feature->bit)) {
-			pr_warn("feature: '%s' is outside the model boundary, using default\n",
-				token);
-			continue;
-		}
-
 		if (kstrtou8(eq, 10, &enable) || enable > 1) {
-			pr_warn("feature: invalid enable value for '%s', using default\n",
+			pr_warn("feature: invalid enable value for '%s', ignored\n",
 				token);
 			continue;
 		}
 
-		if (enable) {
-			requested |= feature->bit;
-			linuwu_sense_config.enabled |= feature->bit;
+		if (enable)
 			linuwu_sense_config.disabled &= ~feature->bit;
-		} else {
-			requested &= ~feature->bit;
+		else
 			linuwu_sense_config.disabled |= feature->bit;
-			linuwu_sense_config.enabled &= ~feature->bit;
-		}
 	}
-
-	linuwu_sense_config.requested = requested & allowed;
 }
 
-static void ls_parse_options_param(u32 requested, u32 allowed)
+static void ls_parse_options_param(void)
 {
 	char buf[sizeof(options_param)];
 	char *token, *next, *eq, *dot;
@@ -444,21 +434,15 @@ static void ls_parse_options_param(u32 requested, u32 allowed)
 			continue;
 		}
 
-		if (!(allowed & feature->bit)) {
-			pr_warn("options: '%s' is outside the model boundary, ignored\n",
-				token);
-			continue;
-		}
-
 		if (!strcmp(dot, "enable")) {
 			pr_warn("options: '%s.enable' belongs in feature=, ignored\n",
 				token);
 			continue;
 		}
 
-		if (!(requested & feature->bit)) {
-			pr_warn("options: '%s.%s' ignored, feature is disabled; use %s.enable=1\n",
-				token, dot, token);
+		if (linuwu_sense_config.disabled & feature->bit) {
+			pr_warn("options: '%s.%s' ignored, feature is disabled\n",
+				token, dot);
 			continue;
 		}
 
@@ -493,23 +477,12 @@ static void ls_parse_options_param(u32 requested, u32 allowed)
 	}
 }
 
-static int linuwu_sense_config_init(const struct linuwu_sense_quirks *quirks)
+static int linuwu_sense_config_init(void)
 {
 	memset(&linuwu_sense_config, 0, sizeof(linuwu_sense_config));
 
-	linuwu_sense_default_on = linuwu_sense_default_features(quirks);
-	linuwu_sense_allowed = linuwu_sense_allowed_features(quirks);
-
-	if (linuwu_sense_default_on & ~linuwu_sense_allowed) {
-		pr_warn("model table error: default features exceed the boundary, clamping\n");
-		linuwu_sense_default_on &= linuwu_sense_allowed;
-	}
-
-	linuwu_sense_config.requested = linuwu_sense_default_on;
-
-	ls_parse_feature_param(linuwu_sense_default_on, linuwu_sense_allowed);
-	ls_parse_options_param(linuwu_sense_config.requested,
-			       linuwu_sense_allowed);
+	ls_parse_feature_param();
+	ls_parse_options_param();
 
 	return 0;
 }
@@ -529,9 +502,6 @@ static void set_quirks(struct acer_wmi *acer)
 		acer->capability |= ACER_CAP_PREDATOR_SENSE;
 	if (quirks->nitro_v4)
 		acer->capability |= ACER_CAP_NITRO_SENSE_V4;
-
-	acer->cpu_fan_control = quirks->cpu_fans > 0;
-	acer->gpu_fan_control = quirks->gpu_fans > 0;
 }
 
 static void ls_update_capability(struct acer_wmi *acer)
@@ -548,10 +518,58 @@ static void ls_update_capability(struct acer_wmi *acer)
 		acer->capability |= ACER_CAP_FAN_SPEED_READ;
 }
 
-static void ls_clear_feature(struct acer_wmi *acer, u32 feature)
+/*
+ * Disable a feature whose verification or firmware handshake failed after the
+ * feature set was built. The evidence is updated as well: the feature must not
+ * look available in debugfs when the driver could not use it.
+ */
+static void ls_disable_feature(struct acer_wmi *acer, u32 feature, int err)
 {
+	int index = ls_feature_index(feature);
+
+	acer->caps.available &= ~feature;
 	acer->caps.effective &= ~feature;
+
+	if (feature == LS_FEAT_FAN_CONTROL) {
+		acer->cpu_fan_control = false;
+		acer->gpu_fan_control = false;
+	}
+
+	if (index >= 0 && index < LS_FEAT_COUNT) {
+		acer->caps.last_err[index] = err;
+		if (err == -EIO || err == -ETIMEDOUT || err == -EAGAIN)
+			acer->caps.state[index] = LS_PROBE_INCONCLUSIVE;
+		else
+			acer->caps.state[index] = LS_PROBE_UNSUPPORTED;
+	}
+
 	ls_update_capability(acer);
+}
+
+/*
+ * A frontend failed to register. The hardware may still support the feature,
+ * so keep the verification result and record the publish failure separately.
+ */
+static void ls_publish_failed(struct acer_wmi *acer, u32 feature, int err)
+{
+	int index = ls_feature_index(feature);
+
+	acer->caps.effective &= ~feature;
+
+	if (index >= 0 && index < LS_FEAT_COUNT)
+		acer->caps.publish_err[index] = err;
+
+	ls_update_capability(acer);
+}
+
+/*
+ * Record a successful real write. This is runtime evidence: it never turns a
+ * feature on, it only documents that a write path the verification could not
+ * exercise actually worked.
+ */
+static void ls_note_write(struct acer_wmi *acer, u32 feature)
+{
+	acer->caps.write_ok |= feature;
 }
 
 /*
@@ -599,25 +617,32 @@ static unsigned long ls_endpoints_present(struct acer_wmi *acer)
 }
 
 /*
- * Capability probe. Only features the user explicitly enabled outside the
- * historical default are probed; the defaults keep their current behaviour.
+ * Record the result of a feature verification. A feature needs a definite
+ * positive result to become available. Any failure leaves it disabled.
  */
-static void ls_probe_record(struct acer_wmi *acer, u32 bit, int err)
+static void ls_verify_record(struct acer_wmi *acer,
+			     const struct linuwu_sense_feature_desc *feature,
+			     int err)
 {
-	const struct linuwu_sense_feature_desc *feature = ls_feature_by_bit(bit);
-	int index = ls_feature_index(bit);
+	int index = ls_feature_index(feature->bit);
 
-	if (!feature || index < 0 || index >= LS_FEAT_COUNT)
+	if (index < 0 || index >= LS_FEAT_COUNT)
 		return;
 
 	acer->caps.last_err[index] = err;
 
 	if (!err) {
 		acer->caps.state[index] = LS_PROBE_SUPPORTED;
-		linuwu_sense_dbg(acer->parent, "feature %s: probe supported\n",
+		acer->caps.read_ok |= feature->bit;
+		acer->caps.available |= feature->bit;
+		linuwu_sense_dbg(acer->parent,
+				 "feature %s: verification succeeded\n",
 				 feature->name);
 		return;
 	}
+
+	acer->caps.available &= ~feature->bit;
+	acer->caps.read_ok &= ~feature->bit;
 
 	if (err == -ENODEV)
 		acer->caps.state[index] = LS_PROBE_DEFERRED;
@@ -626,9 +651,19 @@ static void ls_probe_record(struct acer_wmi *acer, u32 bit, int err)
 	else
 		acer->caps.state[index] = LS_PROBE_INCONCLUSIVE;
 
-	acer->caps.effective &= ~bit;
-	dev_warn(acer->parent, "feature %s: probe failed (%d), disabled\n",
-		 feature->name, err);
+	if (err == -EOPNOTSUPP) {
+		linuwu_sense_dbg(acer->parent,
+				 "feature %s: not supported by the firmware\n",
+				 feature->name);
+	} else if (err == -ENODEV) {
+		dev_warn(acer->parent,
+			 "feature %s: required endpoint disappeared during verification\n",
+			 feature->name);
+	} else {
+		dev_warn(acer->parent,
+			 "feature %s: verification inconclusive (%d), not available\n",
+			 feature->name, err);
+	}
 }
 
 /*
@@ -646,6 +681,8 @@ static void ls_probe_defer(struct acer_wmi *acer, const struct linuwu_sense_feat
 
 	acer->caps.state[index] = LS_PROBE_DEFERRED;
 	acer->caps.last_err[index] = -ENODEV;
+	acer->caps.available &= ~feature->bit;
+	acer->caps.read_ok &= ~feature->bit;
 	acer->caps.effective &= ~feature->bit;
 
 	dev_warn(acer->parent,
@@ -658,8 +695,8 @@ static void ls_defer_missing_features(struct acer_wmi *acer)
 	unsigned long missing;
 	unsigned int i;
 
-	acer->caps.endpoints_required =
-		ls_required_endpoints(acer->caps.requested);
+	acer->caps.endpoints_required = ls_required_endpoints(
+		~(acer->caps.disabled | acer->caps.denied));
 	missing = acer->caps.endpoints_required & ~acer->caps.endpoints_present;
 	if (!missing)
 		return;
@@ -674,7 +711,9 @@ static void ls_defer_missing_features(struct acer_wmi *acer)
 			&linuwu_sense_features[i];
 		unsigned long feature_missing;
 
-		if (!(acer->caps.requested & feature->bit))
+		if (acer->caps.disabled & feature->bit)
+			continue;
+		if (acer->caps.denied & feature->bit)
 			continue;
 
 		feature_missing = feature->requires & missing;
@@ -683,7 +722,15 @@ static void ls_defer_missing_features(struct acer_wmi *acer)
 	}
 }
 
-static int ls_probe_fan_tach(struct acer_wmi *acer)
+static bool ls_valid_fan_mode(enum linuwu_sense_fan_mode mode)
+{
+	return mode == LINUWU_SENSE_FAN_MODE_AUTO ||
+	       mode == LINUWU_SENSE_FAN_MODE_TURBO ||
+	       mode == LINUWU_SENSE_FAN_MODE_CUSTOM;
+}
+
+static int ls_probe_fan_tach(struct acer_wmi *acer,
+			     struct linuwu_sense_evidence *ev)
 {
 	u64 sensors;
 	int err;
@@ -694,7 +741,7 @@ static int ls_probe_fan_tach(struct acer_wmi *acer)
 	if (err)
 		return err;
 
-	acer->caps.sensors = sensors;
+	ev->sensors = sensors;
 
 	if (!linuwu_sense_gaming_sensor_is_supported(
 		    sensors, LINUWU_SENSE_GAMING_SENSOR_CPU_FAN_SPEED) &&
@@ -705,38 +752,67 @@ static int ls_probe_fan_tach(struct acer_wmi *acer)
 	return 0;
 }
 
-static int ls_probe_fan_control(struct acer_wmi *acer)
+static int ls_probe_fan_control(struct acer_wmi *acer,
+				struct linuwu_sense_evidence *ev)
 {
 	enum linuwu_sense_fan_mode mode;
 	struct wmi_device *wdev;
-	bool cpu = false;
-	bool gpu = false;
-	int err;
+	u8 read = 0;
+	u8 pwm_read = 0;
+	int err = 0;
+	int ret;
+	int fan;
 
 	mutex_lock(&acer->lock);
 	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
 	if (!wdev) {
-		err = -ENODEV;
-		goto out_unlock;
+		mutex_unlock(&acer->lock);
+		return -ENODEV;
 	}
 
-	if (!linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_CPU, &mode))
-		cpu = true;
-	if (!linuwu_sense_fan_get_mode(wdev, LINUWU_SENSE_FAN_GPU, &mode))
-		gpu = true;
+	for (fan = LINUWU_SENSE_FAN_CPU; fan <= LINUWU_SENSE_FAN_GPU; fan++) {
+		u8 speed;
 
-	err = (cpu || gpu) ? 0 : -EOPNOTSUPP;
+		ret = linuwu_sense_fan_get_mode(wdev, fan, &mode);
+		if (ret) {
+			if (!err)
+				err = ret;
+			continue;
+		}
 
-out_unlock:
+		if (!ls_valid_fan_mode(mode)) {
+			if (!err)
+				err = -EIO;
+			continue;
+		}
+
+		read |= BIT(fan);
+
+		/*
+		 * The manual duty readback is a separate read capability.
+		 * A firmware that implements the mode commands does not
+		 * necessarily implement method 17.
+		 */
+		ret = linuwu_sense_fan_get_speed(wdev, fan, &speed);
+		if (!ret && speed <= 100)
+			pwm_read |= BIT(fan);
+	}
 	mutex_unlock(&acer->lock);
 
-	acer->cpu_fan_control |= cpu;
-	acer->gpu_fan_control |= gpu;
+	ev->fan_read = read;
+	ev->fan_pwm_read = pwm_read;
 
-	return err;
+	if (!read) {
+		if (err)
+			return err;
+		return -EOPNOTSUPP;
+	}
+
+	return 0;
 }
 
-static int ls_probe_thermal_profile(struct acer_wmi *acer)
+static int ls_probe_thermal_profile(struct acer_wmi *acer,
+				    struct linuwu_sense_evidence *ev)
 {
 	unsigned long profiles = 0;
 	int err;
@@ -745,15 +821,25 @@ static int ls_probe_thermal_profile(struct acer_wmi *acer)
 	err = linuwu_sense_gaming_get_supported_thermal_profiles(acer,
 								 &profiles);
 	mutex_unlock(&acer->lock);
+	if (err)
+		return err;
 
-	if (!err && !profiles)
-		err = -EOPNOTSUPP;
+	ev->profiles = profiles;
 
-	acer->caps.profiles = profiles;
-	return err;
+	if (!profiles)
+		return -EOPNOTSUPP;
+
+	return 0;
 }
 
-static int ls_probe_battery_health(struct acer_wmi *acer)
+static int ls_probe_keyboard_4zone(struct acer_wmi *acer,
+				   struct linuwu_sense_evidence *ev)
+{
+	return linuwu_sense_keyboard_probe(acer);
+}
+
+static int ls_probe_battery_health(struct acer_wmi *acer,
+				   struct linuwu_sense_evidence *ev)
 {
 	struct wmi_device *wdev;
 	int enabled;
@@ -768,10 +854,14 @@ static int ls_probe_battery_health(struct acer_wmi *acer)
 		err = -ENODEV;
 	mutex_unlock(&acer->lock);
 
+	if (!err && enabled != 0 && enabled != 1)
+		err = -EOPNOTSUPP;
+
 	return err;
 }
 
-static int ls_probe_usb_charging(struct acer_wmi *acer)
+static int ls_probe_usb_charging(struct acer_wmi *acer,
+				 struct linuwu_sense_evidence *ev)
 {
 	struct wmi_device *wdev;
 	int percent;
@@ -785,13 +875,15 @@ static int ls_probe_usb_charging(struct acer_wmi *acer)
 		err = -ENODEV;
 	mutex_unlock(&acer->lock);
 
-	if (!err && percent < 0)
+	if (!err && percent != 0 && percent != 10 && percent != 20 &&
+	    percent != 30)
 		err = -EOPNOTSUPP;
 
 	return err;
 }
 
-static int ls_probe_backlight_timeout(struct acer_wmi *acer)
+static int ls_probe_backlight_timeout(struct acer_wmi *acer,
+				      struct linuwu_sense_evidence *ev)
 {
 	int state;
 	int err;
@@ -800,13 +892,14 @@ static int ls_probe_backlight_timeout(struct acer_wmi *acer)
 	err = linuwu_sense_gaming_get_backlight_timeout(acer, &state);
 	mutex_unlock(&acer->lock);
 
-	if (!err && state < 0)
+	if (!err && state != 0 && state != 1)
 		err = -EOPNOTSUPP;
 
 	return err;
 }
 
-static int ls_probe_boot_animation(struct acer_wmi *acer)
+static int ls_probe_boot_animation(struct acer_wmi *acer,
+				   struct linuwu_sense_evidence *ev)
 {
 	int state;
 	int err;
@@ -815,13 +908,14 @@ static int ls_probe_boot_animation(struct acer_wmi *acer)
 	err = linuwu_sense_gaming_get_boot_animation_sound(acer, &state);
 	mutex_unlock(&acer->lock);
 
-	if (!err && state < 0)
+	if (!err && state != 0 && state != 1)
 		err = -EOPNOTSUPP;
 
 	return err;
 }
 
-static int ls_probe_lcd_override(struct acer_wmi *acer)
+static int ls_probe_lcd_override(struct acer_wmi *acer,
+				 struct linuwu_sense_evidence *ev)
 {
 	int state;
 	int err;
@@ -830,51 +924,80 @@ static int ls_probe_lcd_override(struct acer_wmi *acer)
 	err = linuwu_sense_gaming_get_lcd_override(acer, &state);
 	mutex_unlock(&acer->lock);
 
-	if (!err && state < 0)
+	if (!err && state != 0 && state != 1)
 		err = -EOPNOTSUPP;
 
 	return err;
 }
 
-static void acer_wmi_caps_probe(struct acer_wmi *acer)
+/*
+ * Verify every feature that is not explicitly disabled. The endpoint checks
+ * and the quirk veto run first; only then is the firmware queried. A feature
+ * whose verification does not produce a definite positive result stays
+ * unavailable, even when it used to be on by default.
+ */
+static void acer_wmi_verify_features(struct acer_wmi *acer)
 {
-	unsigned long missing =
-		acer->caps.endpoints_required & ~acer->caps.endpoints_present;
-	u32 want = acer->caps.requested & ~acer->caps.default_on;
+	struct linuwu_sense_evidence ev;
 	unsigned int i;
 
-	/* Features without their endpoints were already recorded as deferred. */
-	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++)
-		if (linuwu_sense_features[i].requires & missing)
-			want &= ~linuwu_sense_features[i].bit;
+	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++) {
+		const struct linuwu_sense_feature_desc *feature =
+			&linuwu_sense_features[i];
+		int err;
 
-	if (want & LS_FEAT_FAN_TACH)
-		ls_probe_record(acer, LS_FEAT_FAN_TACH,
-				ls_probe_fan_tach(acer));
-	if (want & LS_FEAT_FAN_CONTROL)
-		ls_probe_record(acer, LS_FEAT_FAN_CONTROL,
-				ls_probe_fan_control(acer));
-	if (want & LS_FEAT_THERMAL_PROFILE)
-		ls_probe_record(acer, LS_FEAT_THERMAL_PROFILE,
-				ls_probe_thermal_profile(acer));
-	if (want & LS_FEAT_KEYBOARD_4ZONE)
-		ls_probe_record(acer, LS_FEAT_KEYBOARD_4ZONE,
-				linuwu_sense_keyboard_probe(acer));
-	if (want & LS_FEAT_BATTERY_HEALTH)
-		ls_probe_record(acer, LS_FEAT_BATTERY_HEALTH,
-				ls_probe_battery_health(acer));
-	if (want & LS_FEAT_USB_CHARGING)
-		ls_probe_record(acer, LS_FEAT_USB_CHARGING,
-				ls_probe_usb_charging(acer));
-	if (want & LS_FEAT_BACKLIGHT_TIMEOUT)
-		ls_probe_record(acer, LS_FEAT_BACKLIGHT_TIMEOUT,
-				ls_probe_backlight_timeout(acer));
-	if (want & LS_FEAT_BOOT_ANIMATION)
-		ls_probe_record(acer, LS_FEAT_BOOT_ANIMATION,
-				ls_probe_boot_animation(acer));
-	if (want & LS_FEAT_LCD_OVERRIDE)
-		ls_probe_record(acer, LS_FEAT_LCD_OVERRIDE,
-				ls_probe_lcd_override(acer));
+		if (acer->caps.disabled & feature->bit)
+			continue;
+
+		if (acer->quirks->deny & feature->bit) {
+			ls_verify_record(acer, feature, -EOPNOTSUPP);
+			dev_warn(acer->parent,
+				 "feature %s: denied by the model quirk\n",
+				 feature->name);
+			continue;
+		}
+
+		/* Already recorded as deferred by the endpoint check. */
+		if (feature->requires & ~acer->caps.endpoints_present)
+			continue;
+
+		memset(&ev, 0, sizeof(ev));
+		err = feature->verify(acer, &ev);
+		if (!err) {
+			switch (feature->bit) {
+			case LS_FEAT_FAN_TACH:
+				acer->caps.evidence.sensors = ev.sensors;
+				break;
+			case LS_FEAT_FAN_CONTROL:
+				acer->caps.evidence.fan_read = ev.fan_read;
+				acer->caps.evidence.fan_pwm_read =
+					ev.fan_pwm_read;
+				break;
+			case LS_FEAT_THERMAL_PROFILE:
+				acer->caps.evidence.profiles = ev.profiles;
+				break;
+			default:
+				break;
+			}
+		}
+
+		ls_verify_record(acer, feature, err);
+	}
+
+	acer->caps.available &= ~acer->caps.disabled;
+	acer->caps.effective = acer->caps.available & ~acer->caps.disabled;
+
+	if (acer->caps.effective & LS_FEAT_FAN_CONTROL) {
+		acer->cpu_fan_control =
+			!!(acer->caps.evidence.fan_read &
+			   BIT(LINUWU_SENSE_FAN_CPU));
+		acer->gpu_fan_control =
+			!!(acer->caps.evidence.fan_read &
+			   BIT(LINUWU_SENSE_FAN_GPU));
+	} else {
+		acer->cpu_fan_control = false;
+		acer->gpu_fan_control = false;
+	}
 
 	ls_update_capability(acer);
 }
@@ -886,10 +1009,27 @@ static bool acer_turbo_fan_supported(struct acer_wmi *acer)
 	       (acer->cpu_fan_control || acer->gpu_fan_control);
 }
 
-static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
+/*
+ * Set the mode of every controlled fan. The fans are written individually
+ * because a single behavior command covering both fans has been observed to
+ * report success without changing the mode on some firmware.
+ *
+ * @written, when non-NULL, receives the bitmap of the channels whose write
+ * succeeded. This is the write-side evidence used by the setup path.
+ */
+static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo,
+					  u8 *written)
 {
+	enum linuwu_sense_fan_mode mode =
+		turbo ? LINUWU_SENSE_FAN_MODE_TURBO :
+			LINUWU_SENSE_FAN_MODE_AUTO;
 	struct wmi_device *wdev;
-	int err;
+	u8 mask = 0;
+	int err = 0;
+	int ret;
+
+	if (written)
+		*written = 0;
 
 	if (!acer_turbo_fan_supported(acer))
 		return -EOPNOTSUPP;
@@ -900,14 +1040,26 @@ static int acer_set_turbo_fan_mode_locked(struct acer_wmi *acer, bool turbo)
 	if (!wdev)
 		return -ENODEV;
 
-	err = linuwu_sense_fan_set_mode(wdev, acer->cpu_fan_control,
-					acer->gpu_fan_control,
-					turbo ? LINUWU_SENSE_FAN_MODE_TURBO :
-						LINUWU_SENSE_FAN_MODE_AUTO);
-	if (err)
-		return err;
+	if (acer->cpu_fan_control) {
+		ret = linuwu_sense_fan_set_mode(wdev, true, false, mode);
+		if (ret)
+			err = ret;
+		else
+			mask |= BIT(LINUWU_SENSE_FAN_CPU);
+	}
 
-	return 0;
+	if (acer->gpu_fan_control) {
+		ret = linuwu_sense_fan_set_mode(wdev, false, true, mode);
+		if (ret && !err)
+			err = ret;
+		else if (!ret)
+			mask |= BIT(LINUWU_SENSE_FAN_GPU);
+	}
+
+	if (written)
+		*written = mask;
+
+	return err;
 }
 
 /*
@@ -1059,6 +1211,8 @@ static ssize_t predator_usb_charging_store(struct device *dev,
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_battery_set_usb_charging(
 		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE), val);
+	if (!err)
+		ls_note_write(acer, LS_FEAT_USB_CHARGING);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return err;
@@ -1106,6 +1260,8 @@ static ssize_t predator_battery_calibration_store(struct device *dev,
 	err = linuwu_sense_battery_set_mode(
 		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_BATTERY),
 		LINUWU_SENSE_BATTERY_MODE_CALIBRATION, val);
+	if (!err)
+		ls_note_write(acer, LS_FEAT_BATTERY_HEALTH);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return err;
@@ -1168,6 +1324,7 @@ static ssize_t predator_turbo_mode_store(struct device *dev,
 					 const char *buf, size_t count)
 {
 	struct acer_wmi *acer = dev_get_drvdata(dev);
+	u8 written = 0;
 	u8 val;
 	int err;
 
@@ -1180,7 +1337,11 @@ static ssize_t predator_turbo_mode_store(struct device *dev,
 		return -EINVAL;
 
 	mutex_lock(&acer->lock);
-	err = acer_set_turbo_fan_mode_locked(acer, val);
+	err = acer_set_turbo_fan_mode_locked(acer, val, &written);
+	if (!err && written) {
+		ls_note_write(acer, LS_FEAT_FAN_CONTROL);
+		acer->caps.evidence.fan_write |= written;
+	}
 	mutex_unlock(&acer->lock);
 	if (err)
 		return err;
@@ -1222,6 +1383,8 @@ static ssize_t predator_lcd_override_store(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_gaming_set_lcd_override(acer, val == 1);
+	if (!err)
+		ls_note_write(acer, LS_FEAT_LCD_OVERRIDE);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return err;
@@ -1265,6 +1428,8 @@ static ssize_t predator_backlight_timeout_store(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_gaming_set_backlight_timeout(acer, val == 1);
+	if (!err)
+		ls_note_write(acer, LS_FEAT_BACKLIGHT_TIMEOUT);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return err;
@@ -1308,6 +1473,8 @@ predator_boot_animation_sound_store(struct device *dev,
 
 	mutex_lock(&acer->lock);
 	err = linuwu_sense_gaming_set_boot_animation_sound(acer, val == 1);
+	if (!err)
+		ls_note_write(acer, LS_FEAT_BOOT_ANIMATION);
 	mutex_unlock(&acer->lock);
 	if (err)
 		return err;
@@ -1463,18 +1630,36 @@ static int acer_platform_probe(struct platform_device *pdev)
 		if (err) {
 			dev_warn(&pdev->dev,
 				 "platform profile frontend disabled: %d\n", err);
-			ls_clear_feature(acer, LS_FEAT_THERMAL_PROFILE);
+			ls_publish_failed(acer, LS_FEAT_THERMAL_PROFILE, err);
 		}
 	}
 
 	if (has_cap(acer, ACER_CAP_TURBO_FAN)) {
+		u8 written = 0;
+
 		mutex_lock(&acer->lock);
 		acer->fan_control_stopped = false;
-		err = acer_set_turbo_fan_mode_locked(acer, false);
+		err = acer_set_turbo_fan_mode_locked(acer, false, &written);
+		acer->caps.evidence.fan_write = written;
+		if (written) {
+			acer->caps.write_ok |= LS_FEAT_FAN_CONTROL;
+			acer->cpu_fan_control =
+				!!(written & BIT(LINUWU_SENSE_FAN_CPU));
+			acer->gpu_fan_control =
+				!!(written & BIT(LINUWU_SENSE_FAN_GPU));
+		}
 		mutex_unlock(&acer->lock);
-		if (err && err != -EOPNOTSUPP)
+
+		if (!written) {
 			dev_warn(&pdev->dev,
-				 "unable to initialize fan mode: %d\n", err);
+				 "no fan accepted the initial mode write: %d\n",
+				 err);
+			ls_disable_feature(acer, LS_FEAT_FAN_CONTROL,
+					   err ? err : -EOPNOTSUPP);
+		} else if (err) {
+			dev_warn(&pdev->dev,
+				 "fan mode partially initialized: %d\n", err);
+		}
 	}
 
 	if (has_cap(acer, ACER_CAP_PREDATOR_SENSE)) {
@@ -1504,7 +1689,7 @@ static int acer_platform_probe(struct platform_device *pdev)
 		if (err) {
 			dev_warn(&pdev->dev,
 				 "keyboard frontend disabled: %d\n", err);
-			ls_clear_feature(acer, LS_FEAT_KEYBOARD_4ZONE);
+			ls_publish_failed(acer, LS_FEAT_KEYBOARD_4ZONE, err);
 		}
 	}
 
@@ -1513,7 +1698,7 @@ static int acer_platform_probe(struct platform_device *pdev)
 		if (err) {
 			dev_warn(&pdev->dev,
 				 "battery health frontend disabled: %d\n", err);
-			ls_clear_feature(acer, LS_FEAT_BATTERY_HEALTH);
+			ls_publish_failed(acer, LS_FEAT_BATTERY_HEALTH, err);
 		}
 	}
 
@@ -1527,8 +1712,10 @@ static int acer_platform_probe(struct platform_device *pdev)
 		if (err) {
 			dev_warn(&pdev->dev,
 				 "hwmon frontend disabled: %d\n", err);
-			ls_clear_feature(acer, LS_FEAT_FAN_TACH |
-						 LS_FEAT_FAN_CONTROL);
+			ls_publish_failed(acer, LS_FEAT_FAN_TACH,
+					  err);
+			ls_publish_failed(acer, LS_FEAT_FAN_CONTROL,
+					  err);
 		}
 	}
 
@@ -2055,29 +2242,27 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 	set_quirks(acer);
 
 	acer->config = &linuwu_sense_config;
-	acer->caps.allowed = linuwu_sense_allowed;
-	acer->caps.default_on = linuwu_sense_default_on;
-	acer->caps.requested = linuwu_sense_config.requested;
-	acer->caps.effective = acer->caps.requested;
+	acer->caps.disabled = linuwu_sense_config.disabled;
+	acer->caps.denied = acer->quirks->deny;
+	acer->caps.available = 0;
+	acer->caps.effective = 0;
+	acer->caps.read_ok = 0;
+	acer->caps.write_ok = 0;
+	memset(&acer->caps.evidence, 0, sizeof(acer->caps.evidence));
 
 	for (i = 0; i < LS_FEAT_COUNT; i++) {
 		acer->caps.state[i] = LS_PROBE_NOT_PROBED;
 		acer->caps.last_err[i] = 0;
+		acer->caps.publish_err[i] = 0;
 	}
 
-	ls_defer_missing_features(acer);
-	acer_wmi_caps_probe(acer);
-
-	linuwu_sense_dbg(acer->parent,
-			 "model boundary 0x%x, defaults 0x%x, requested 0x%x, effective 0x%x\n",
-			 acer->caps.allowed, acer->caps.default_on,
-			 acer->caps.requested, acer->caps.effective);
-
 	/*
-	 * Bring up the firmware side of the Acer interface before any
-	 * interface is published to the rest of the system. These handshakes
-	 * are best effort: a failure is reported but must not turn the whole
-	 * aggregate into a terminal failure.
+	 * Bring up the firmware side of the Acer interface before probing the
+	 * features, matching the order used by the upstream acer-wmi driver.
+	 * Some firmware only answers the feature queries once the launch
+	 * manager/EC raw mode handshake ran. These handshakes are best effort:
+	 * a failure is reported but must not turn the whole aggregate into a
+	 * terminal failure.
 	 */
 	mutex_lock(&acer->lock);
 	if (linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_APGE) &&
@@ -2098,6 +2283,26 @@ static int acer_wmi_instance_setup(struct acer_wmi *acer)
 				 "no WMID EC raw mode enable method\n");
 	}
 	mutex_unlock(&acer->lock);
+
+	ls_defer_missing_features(acer);
+	acer_wmi_verify_features(acer);
+
+	linuwu_sense_dbg(acer->parent,
+			 "disabled 0x%x, denied 0x%x, available 0x%x, effective 0x%x\n",
+			 acer->caps.disabled, acer->caps.denied,
+			 acer->caps.available, acer->caps.effective);
+
+	/*
+	 * Nothing to publish: no feature survived the verification and there
+	 * is no event endpoint for the hotkey input. Keep the instance for
+	 * the debugfs dump, but do not create an empty platform device.
+	 */
+	if (!acer->caps.effective &&
+	    !(acer->caps.endpoints_present & LS_EP(ACER_WMI_GUID_EVENT))) {
+		linuwu_sense_dbg(acer->parent,
+				 "no usable Acer interface, not publishing a platform device\n");
+		return 0;
+	}
 
 	/*
 	 * Keep a stable device name for the logical device of the only
@@ -2181,24 +2386,48 @@ static const char *ls_probe_state_name(const struct acer_wmi *acer, u32 bit)
 {
 	int index = ls_feature_index(bit);
 
-	if (!(acer->caps.requested & bit))
+	if (acer->caps.disabled & bit)
 		return "disabled";
 	if (index < 0 || index >= LS_FEAT_COUNT)
 		return "invalid";
 
 	switch (acer->caps.state[index]) {
 	case LS_PROBE_NOT_PROBED:
-		return "default";
+		return "not-probed";
 	case LS_PROBE_SUPPORTED:
-		return "supported";
+		return "available";
 	case LS_PROBE_UNSUPPORTED:
-		return "unsupported";
+		return "unavailable";
 	case LS_PROBE_INCONCLUSIVE:
-		return "inconclusive";
+		return "unknown";
 	case LS_PROBE_DEFERRED:
 		return "deferred";
 	default:
 		return "unknown";
+	}
+}
+
+static void ls_evidence_show(struct seq_file *m, const struct acer_wmi *acer,
+			     const struct linuwu_sense_feature_desc *feature)
+{
+	switch (feature->bit) {
+	case LS_FEAT_FAN_TACH:
+		seq_printf(m, "sensors=0x%016llx",
+			   (unsigned long long)acer->caps.evidence.sensors);
+		break;
+	case LS_FEAT_FAN_CONTROL:
+		seq_printf(m, "fans=0x%02x write=0x%02x pwm_read=0x%02x",
+			   acer->caps.evidence.fan_read,
+			   acer->caps.evidence.fan_write,
+			   acer->caps.evidence.fan_pwm_read);
+		break;
+	case LS_FEAT_THERMAL_PROFILE:
+		seq_printf(m, "profiles=0x%016lx",
+			   acer->caps.evidence.profiles);
+		break;
+	default:
+		seq_puts(m, "-");
+		break;
 	}
 }
 
@@ -2210,35 +2439,41 @@ static void ls_caps_show_one(struct seq_file *m, const struct acer_wmi *acer)
 	seq_printf(m, "device: %s\n",
 		   acer->parent ? dev_name(acer->parent) : "unknown");
 	seq_printf(m, "model: %s\n", model ? model : "unknown");
-	seq_printf(m, "allowed:    0x%08x\n", acer->caps.allowed);
-	seq_printf(m, "default_on: 0x%08x\n", acer->caps.default_on);
-	seq_printf(m, "requested:  0x%08x\n", acer->caps.requested);
-	seq_printf(m, "effective:  0x%08x\n",
-		   acer->caps.effective);
+	seq_printf(m, "disabled:   0x%08x\n", acer->caps.disabled);
+	seq_printf(m, "denied:     0x%08x\n", acer->caps.denied);
+	seq_printf(m, "available:  0x%08x\n", acer->caps.available);
+	seq_printf(m, "effective:  0x%08x\n", acer->caps.effective);
 	seq_printf(m, "endpoints:  present 0x%lx, required 0x%lx, missing 0x%lx\n",
 		   acer->caps.endpoints_present, acer->caps.endpoints_required,
 		   acer->caps.endpoints_required & ~acer->caps.endpoints_present);
 	seq_printf(m, "sensors:    0x%016llx\n",
-		   (unsigned long long)acer->caps.sensors);
-	seq_printf(m, "profiles:   0x%016lx\n", acer->caps.profiles);
+		   (unsigned long long)acer->caps.evidence.sensors);
+	seq_printf(m, "profiles:   0x%016lx\n", acer->caps.evidence.profiles);
 	seq_puts(m, "\n");
 
-	seq_printf(m, "%-20s %-7s %-12s %-7s %-8s %s\n", "feature",
-		   "enabled", "probe", "error", "requires", "configured");
+	seq_printf(m, "%-20s %-8s %-12s %-4s %-4s %-5s %-7s %s\n",
+		   "feature", "requires", "state", "read", "write", "err",
+		   "publish", "evidence");
 	for (i = 0; i < ARRAY_SIZE(linuwu_sense_features); i++) {
 		const struct linuwu_sense_feature_desc *feature =
 			&linuwu_sense_features[i];
 		int index = ls_feature_index(feature->bit);
+		int err = 0;
 
-		seq_printf(m, "%-20s %-7s %-12s %-7d 0x%-6lx %s\n",
-			   feature->name,
-			   (acer->caps.effective & feature->bit) ? "yes" : "no",
+		if (index >= 0 && index < LS_FEAT_COUNT)
+			err = acer->caps.last_err[index];
+
+		seq_printf(m, "%-20s 0x%-6lx %-12s %-4s %-4s %-5d %-7d ",
+			   feature->name, feature->requires,
 			   ls_probe_state_name(acer, feature->bit),
+			   (acer->caps.read_ok & feature->bit) ? "yes" : "no",
+			   (acer->caps.write_ok & feature->bit) ? "yes" : "no",
+			   err,
 			   (index >= 0 && index < LS_FEAT_COUNT) ?
-				   acer->caps.last_err[index] :
-				   0,
-			   feature->requires,
-			   (acer->caps.requested & feature->bit) ? "yes" : "no");
+				   acer->caps.publish_err[index] :
+				   0);
+		ls_evidence_show(m, acer, feature);
+		seq_puts(m, "\n");
 	}
 	seq_puts(m, "\n");
 }
@@ -2274,7 +2509,7 @@ static int __init acer_wmi_init(void)
 		return -ENODEV;
 	}
 
-	linuwu_sense_config_init(acer_wmi_quirks);
+	linuwu_sense_config_init();
 
 	linuwu_sense_debugfs = debugfs_create_dir("linuwu_sense", NULL);
 	if (!IS_ERR_OR_NULL(linuwu_sense_debugfs))

@@ -55,37 +55,71 @@ Only Predator PHN16-71 is fully supported. The other models are matched by the c
 
 ## ⚙️ Feature configuration
 
-The DMI entry of the matched model is a hard capability boundary. The driver
-keeps the historical behaviour as the default set; `feature=` can only move
-features inside the boundary, and a runtime probe must confirm a newly enabled
-feature before it is used. Features that are off by default stay off until
-they are explicitly enabled:
+The DMI table only selects the supported machine and its Acer interface
+family. It no longer describes which features the machine has: at load time
+the driver queries the firmware for every feature that was not explicitly
+disabled and enables a feature only when the query produced a definite
+positive result.
+
+`feature=` is therefore an opt-out. `.enable=0` disables a feature before it
+is verified, while `.enable=1` and "not mentioned at all" are equivalent and
+leave the decision to the hardware evidence. A feature that the firmware does
+not answer, or for which a required WMI endpoint is missing, stays disabled:
 
 ```text
 # /etc/modprobe.d/linuwu-sense.conf
 
-# disable a feature that is on by default
+# do not expose fan control, even if the firmware answers
 options linuwu_sense feature=fan_control.enable=0
 
-# enable a feature that is off by default (probe must also succeed)
-options linuwu_sense feature=keyboard_4zone.enable=1 options=keyboard_4zone.firstzone=ff8800
+# set keyboard colours; no enable=1 is needed anymore
+options linuwu_sense options=keyboard_4zone.firstzone=ff8800
 ```
 
 The leading `options` is the modprobe.d directive; the `options=` after the
 module name is the driver parameter.
 
 - `feature=<feature>.enable=0|1` only accepts `enable`; anything else is
-  ignored with a warning.
+  ignored with a warning. The last value for a feature wins.
 - `options=<feature>.<option>=<value>` carries feature specific values. It
-  never enables a feature; the feature must already be enabled.
-- A feature outside the DMI boundary is ignored with a warning and the model
-  default is kept.
-- `options` for a disabled feature is ignored with a warning.
-- Enabled features: `fan_tach`, `fan_control`, `thermal_profile`,
+  is ignored when the feature is disabled or unavailable.
+- `keyboard_4zone` supports `firstzone` to `fourthzone` as `RRGGBB` (or
+  `0xRRGGBB`).
+- Features: `fan_tach`, `fan_control`, `thermal_profile`,
   `keyboard_4zone`, `battery_health`, `usb_charging`,
   `backlight_timeout`, `boot_animation`, `lcd_override`.
-- `keyboard_4zone` currently supports `firstzone` to `fourthzone` as
-  `RRGGBB` (or `0xRRGGBB`).
+
+The endpoint each feature needs and the evidence collected for it:
+
+| feature | endpoint | evidence |
+|---|---|---|
+| `fan_tach` | GAMING | supported sensor bitmap |
+| `fan_control` | GAMING | fan mode read per channel, real mode write, manual duty readback |
+| `thermal_profile` | GAMING | supported platform profile choices |
+| `keyboard_4zone` | GAMING | keyboard backlight and zone state |
+| `battery_health` | BATTERY | battery health mode |
+| `usb_charging` | APGE | USB charging percentage |
+| `backlight_timeout` | APGE | backlight timeout state |
+| `boot_animation` | GAMING | boot animation sound state |
+| `lcd_override` | GAMING | LCD override state |
+
+The verification reads the firmware state; it does not write to the EC. The
+read and write halves are tracked separately. `fan_control` additionally
+needs a successful real fan-mode write during setup, so a firmware that can be
+read but not written is not exposed. For the other writable sysfs controls a
+successful first write is recorded in the debugfs state; before that they are
+shown as `write=no`.
+
+A missing WMI endpoint no longer disables the whole driver. Only the features
+that declare the missing endpoint are deferred; the remaining features and the
+hotkey input keep working.
+
+> **Behaviour change:** features that used to be off by default can now be
+> enabled automatically when the firmware reports them, and a feature that
+> used to be on by default is no longer exposed when the firmware query does
+> not produce a definite positive result. Use
+> `feature=<name>.enable=0` to restore the old behaviour for a specific
+> feature.
 
 The module no longer reads or writes any file. The static keyboard defaults
 come from `options=` at module load; runtime LED changes are not written back.
@@ -99,7 +133,9 @@ echo 1 | sudo tee /sys/module/linuwu_sense/parameters/test_mode
 
 It only raises driver detail logs from debug to info; it does not change the
 effective feature set. The detailed capability state is available read-only at
-`/sys/kernel/debug/linuwu_sense/capabilities`.
+`/sys/kernel/debug/linuwu_sense/capabilities`; it reports the endpoint
+dependencies, the disabled/available/effective masks and the read/write
+evidence collected by the verification.
 
 ## 🛠️ Usage
 # Example Usage and Configuration
