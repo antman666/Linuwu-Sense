@@ -16,6 +16,8 @@
 #include <linux/mutex.h>
 #include <linux/types.h>
 
+#include "linuwu_sense_fan.h"
+
 struct device;
 struct linuwu_sense_input;
 struct linuwu_sense_keyboard;
@@ -51,8 +53,12 @@ struct wmi_device;
 #define LS_FEAT_BACKLIGHT_TIMEOUT BIT(6)
 #define LS_FEAT_BOOT_ANIMATION BIT(7)
 #define LS_FEAT_LCD_OVERRIDE BIT(8)
+#define LS_FEAT_BATTERY_CALIBRATION BIT(9)
 
-#define LS_FEAT_COUNT 9
+#define LS_FEAT_COUNT 10
+
+#define LS_BATTERY_READ_HEALTH BIT(0)
+#define LS_BATTERY_READ_CALIBRATION BIT(1)
 
 enum linuwu_sense_probe_state {
 	LS_PROBE_NOT_PROBED,
@@ -76,7 +82,11 @@ struct linuwu_sense_evidence {
 	unsigned long profiles; /* thermal_profile: supported choices */
 	u8 fan_read;          /* fan_control: channels with a valid mode read */
 	u8 fan_write;         /* fan_control: channels with a verified write */
-	u8 fan_pwm_read;      /* fan_control: channels with manual duty readback */
+	u8 fan_pwm_read; /* channels with a valid Method 17 setpoint read */
+	u8 fan_pwm_write_readback; /* Method 16 writes confirmed by Method 17 */
+	u8 keyboard_backlight_read;
+	u8 keyboard_zone_read; /* successfully readable zone bitmap */
+	u8 battery_read;       /* LS_BATTERY_READ_* */
 };
 
 /*
@@ -270,6 +280,8 @@ struct acer_wmi {
 	/* Fans that are usable for control on this instance */
 	bool cpu_fan_control;
 	bool gpu_fan_control;
+	/* Channels whose post-failure mode could not be restored or confirmed. */
+	u8 fan_mode_uncertain;
 
 	/*
 	 * Protects the endpoint claims in @wdevs[] and @fan_control_stopped,
@@ -307,5 +319,15 @@ struct acer_wmi {
  */
 struct wmi_device *linuwu_sense_endpoint_get(struct acer_wmi *acer,
 					     enum acer_wmi_guid guid);
+
+/* Caller holds acer->lock; set_verified requires successful SET and readback. */
+int acer_wmi_set_fan_mode_locked(struct acer_wmi *acer,
+				 struct wmi_device *wdev,
+				 enum linuwu_sense_fan fan,
+				 enum linuwu_sense_fan_mode mode,
+				 bool *set_verified);
+
+/* Caller must hold acer->lock. Records that a feature's write path succeeded. */
+void linuwu_sense_note_write_locked(struct acer_wmi *acer, u32 feature);
 
 #endif /* _LINUWU_SENSE_H_ */

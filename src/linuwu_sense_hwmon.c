@@ -105,8 +105,10 @@ static int acer_wmi_hwmon_pwm_read(struct acer_wmi *acer, int channel,
 	int ret;
 
 	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
-	if (!wdev)
+	if (!wdev) {
+		acer->fan_mode_uncertain |= BIT(channel);
 		return -ENODEV;
+	}
 
 	/*
 	 * The readback is a separate read capability collected by the
@@ -119,8 +121,11 @@ static int acer_wmi_hwmon_pwm_read(struct acer_wmi *acer, int channel,
 	fan = acer_wmi_hwmon_channel_to_fan(channel);
 
 	ret = linuwu_sense_fan_get_mode(wdev, fan, &mode);
-	if (ret)
+	if (ret) {
+		acer->fan_mode_uncertain |= BIT(channel);
 		return ret;
+	}
+	acer->fan_mode_uncertain &= ~BIT(channel);
 
 	/*
 	 * The firmware keeps returning the last manual duty in automatic and
@@ -147,13 +152,18 @@ static int acer_wmi_hwmon_pwm_enable_read(struct acer_wmi *acer, int channel,
 	int ret;
 
 	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
-	if (!wdev)
+	if (!wdev) {
+		acer->fan_mode_uncertain |= BIT(channel);
 		return -ENODEV;
+	}
 
 	ret = linuwu_sense_fan_get_mode(
 		wdev, acer_wmi_hwmon_channel_to_fan(channel), &mode);
-	if (ret)
+	if (ret) {
+		acer->fan_mode_uncertain |= BIT(channel);
 		return ret;
+	}
+	acer->fan_mode_uncertain &= ~BIT(channel);
 
 	switch (mode) {
 	case LINUWU_SENSE_FAN_MODE_TURBO:
@@ -229,7 +239,7 @@ static int acer_wmi_hwmon_pwm_write(struct device *dev,
 	enum linuwu_sense_fan_mode prev_mode;
 	enum linuwu_sense_fan fan = acer_wmi_hwmon_channel_to_fan(channel);
 	struct wmi_device *wdev;
-	bool cpu, gpu;
+	u8 readback;
 	int percent;
 	int restore;
 	int ret;
@@ -240,15 +250,17 @@ static int acer_wmi_hwmon_pwm_write(struct device *dev,
 	percent = DIV_ROUND_CLOSEST(val * 100, 255);
 
 	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
-	if (!wdev)
+	if (!wdev) {
+		acer->fan_mode_uncertain |= BIT(channel);
 		return -ENODEV;
-
-	cpu = fan == LINUWU_SENSE_FAN_CPU;
-	gpu = !cpu;
+	}
 
 	ret = linuwu_sense_fan_get_mode(wdev, fan, &prev_mode);
-	if (ret)
+	if (ret) {
+		acer->fan_mode_uncertain |= BIT(channel);
 		return ret;
+	}
+	acer->fan_mode_uncertain &= ~BIT(channel);
 
 	/*
 	 * A duty cycle only takes effect in manual mode. method 16 alone only
@@ -256,10 +268,19 @@ static int acer_wmi_hwmon_pwm_write(struct device *dev,
 	 * mode untouched, so switch to manual first unless it is already set.
 	 */
 	if (prev_mode != LINUWU_SENSE_FAN_MODE_CUSTOM) {
-		ret = linuwu_sense_fan_set_mode(wdev, cpu, gpu,
-						LINUWU_SENSE_FAN_MODE_CUSTOM);
-		if (ret)
+		ret = acer_wmi_set_fan_mode_locked(
+			acer, wdev, fan, LINUWU_SENSE_FAN_MODE_CUSTOM, NULL);
+		if (ret) {
+			/* The shared helper verifies both the SET and restoration. */
+			restore = acer_wmi_set_fan_mode_locked(
+				acer, wdev, fan, prev_mode, NULL);
+			if (restore &&
+			    (acer->fan_mode_uncertain & BIT(channel)))
+				dev_warn(dev,
+					 "fan %d mode restoration could not be confirmed after custom-mode error %d: %d\n",
+					 channel, ret, restore);
 			return ret;
+		}
 	}
 
 	ret = linuwu_sense_fan_set_speed(wdev, fan, percent);
@@ -267,18 +288,27 @@ static int acer_wmi_hwmon_pwm_write(struct device *dev,
 		if (prev_mode == LINUWU_SENSE_FAN_MODE_CUSTOM)
 			return ret;
 
-		restore = linuwu_sense_fan_set_mode(wdev, cpu, gpu, prev_mode);
-		if (restore)
+		restore = acer_wmi_set_fan_mode_locked(
+			acer, wdev, fan, prev_mode, NULL);
+		if (restore &&
+		    (acer->fan_mode_uncertain & BIT(channel)))
 			dev_warn(dev,
-				 "failed to restore fan mode %d after pwm error %d: %d\n",
-				 prev_mode, ret, restore);
+				 "fan %d mode restoration could not be confirmed after pwm error %d: %d\n",
+				 channel, ret, restore);
 
 		return ret;
 	}
 
-	/* A real write is the only proof that this channel is writable. */
+	/* Method 16 succeeded; learn the Method 17 readback capability. */
 	acer->caps.evidence.fan_write |= BIT(channel);
-	acer->caps.write_ok |= LS_FEAT_FAN_CONTROL;
+	linuwu_sense_note_write_locked(acer, LS_FEAT_FAN_CONTROL);
+	acer->fan_mode_uncertain &= ~BIT(channel);
+	if (!linuwu_sense_fan_get_speed(wdev, fan, &readback)) {
+		acer->caps.evidence.fan_pwm_read |= BIT(channel);
+		if (readback == percent)
+			acer->caps.evidence.fan_pwm_write_readback |=
+				BIT(channel);
+	}
 
 	return 0;
 }
@@ -287,8 +317,9 @@ static int acer_wmi_hwmon_pwm_enable_write(struct acer_wmi *acer, int channel,
 					   long val)
 {
 	enum linuwu_sense_fan_mode mode;
+	enum linuwu_sense_fan fan = acer_wmi_hwmon_channel_to_fan(channel);
 	struct wmi_device *wdev;
-	bool cpu, gpu;
+	bool set_verified;
 	int ret;
 
 	switch (val) {
@@ -306,16 +337,16 @@ static int acer_wmi_hwmon_pwm_enable_write(struct acer_wmi *acer, int channel,
 	}
 
 	wdev = linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
-	if (!wdev)
+	if (!wdev) {
+		acer->fan_mode_uncertain |= BIT(channel);
 		return -ENODEV;
+	}
 
-	cpu = channel == 0;
-	gpu = !cpu;
-
-	ret = linuwu_sense_fan_set_mode(wdev, cpu, gpu, mode);
-	if (!ret) {
+	ret = acer_wmi_set_fan_mode_locked(acer, wdev, fan, mode,
+					    &set_verified);
+	if (!ret && set_verified) {
 		acer->caps.evidence.fan_write |= BIT(channel);
-		acer->caps.write_ok |= LS_FEAT_FAN_CONTROL;
+		linuwu_sense_note_write_locked(acer, LS_FEAT_FAN_CONTROL);
 	}
 
 	return ret;

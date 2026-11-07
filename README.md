@@ -86,7 +86,7 @@ module name is the driver parameter.
 - `keyboard_4zone` supports `firstzone` to `fourthzone` as `RRGGBB` (or
   `0xRRGGBB`).
 - Features: `fan_tach`, `fan_control`, `thermal_profile`,
-  `keyboard_4zone`, `battery_health`, `usb_charging`,
+  `keyboard_4zone`, `battery_health`, `battery_calibration`, `usb_charging`,
   `backlight_timeout`, `boot_animation`, `lcd_override`.
 
 The endpoint each feature needs and the evidence collected for it:
@@ -94,10 +94,11 @@ The endpoint each feature needs and the evidence collected for it:
 | feature | endpoint | evidence |
 |---|---|---|
 | `fan_tach` | GAMING | supported sensor bitmap |
-| `fan_control` | GAMING | fan mode read per channel, manual duty readback; successful writes recorded |
+| `fan_control` | GAMING | fan mode read per channel; Method 17 manual duty setpoint read is probed independently, and Method 16 write/readback confirmation is tracked separately |
 | `thermal_profile` | GAMING | supported platform profile choices |
-| `keyboard_4zone` | GAMING | keyboard backlight and zone state |
-| `battery_health` | BATTERY | battery health mode |
+| `keyboard_4zone` | GAMING | independent backlight and per-zone GET evidence; partial read support is retained |
+| `battery_health` | BATTERY | battery health mode query |
+| `battery_calibration` | BATTERY | battery calibration mode query |
 | `usb_charging` | APGE | USB charging percentage |
 | `backlight_timeout` | APGE | backlight timeout state |
 | `boot_animation` | GAMING | boot animation sound state |
@@ -110,6 +111,18 @@ but a failure there is only logged; a later write returns the firmware error
 and the feature stays available. The read and write halves are still tracked
 separately: a successful write is recorded in the debugfs state, and before
 that the control is shown as `write=unver`.
+
+`write=yes` means the WMI SET path returned success and every response field
+whose meaning is established by the protocol passed validation. For commands
+whose response payload semantics are not established (for example, per-zone
+RGB writes), the driver validates the WMI call and minimum response shape but
+does not claim that the EC physically applied the requested value. A readback,
+where available, is separate evidence. Fan Method 17 is probed independently
+and exposes the stored manual duty setpoint only while the fan is in manual
+mode; `pwm_write_readback` separately records Method 16 writes whose requested
+setpoint was confirmed by Method 17. The LCD override SET payload is currently
+shape-checked but its status-field semantics have not been established, so
+`write=yes` for that operation confirms the WMI call, not the EC's final state.
 
 A missing WMI endpoint no longer disables the whole driver. Only the features
 that declare the missing endpoint are deferred; the remaining features and the

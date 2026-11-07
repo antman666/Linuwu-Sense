@@ -146,6 +146,7 @@ acer_apply_thermal_profile_locked(struct acer_wmi *acer,
 	if (err)
 		return err;
 
+	linuwu_sense_note_write_locked(acer, LS_FEAT_THERMAL_PROFILE);
 	state->thermal_profile = profile;
 
 	return 0;
@@ -247,7 +248,7 @@ static const struct platform_profile_ops acer_predator_v4_platform_profile_ops =
 	.profile_set = acer_predator_v4_platform_profile_set,
 };
 
-static void acer_platform_profile_setup(struct acer_wmi *acer)
+static int acer_platform_profile_setup(struct acer_wmi *acer)
 {
 	struct linuwu_sense_profile *state = acer->profile;
 	struct device *profile_dev;
@@ -268,11 +269,12 @@ static void acer_platform_profile_setup(struct acer_wmi *acer)
 		err = PTR_ERR(profile_dev);
 		dev_warn(acer->dev,
 			 "platform profile registration failed: %d\n", err);
-		return;
+		return err;
 	}
 
 	state->dev = profile_dev;
 	state->supported = true;
+	return 0;
 }
 
 int linuwu_sense_profile_init(struct acer_wmi *acer)
@@ -297,8 +299,13 @@ int linuwu_sense_profile_init(struct acer_wmi *acer)
 				 err);
 	}
 
-	acer_platform_profile_setup(acer);
+	err = acer_platform_profile_setup(acer);
+	if (err)
+		dev_warn(acer->dev,
+			 "platform_profile frontend unavailable; thermal hotkey cycling remains enabled: %d\n",
+			 err);
 
+	/* Keep the internal state even when the standard class is unavailable. */
 	return 0;
 }
 

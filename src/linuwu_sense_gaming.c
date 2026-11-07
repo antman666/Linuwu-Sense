@@ -140,6 +140,9 @@ int linuwu_sense_gaming_enable_rf_button(struct acer_wmi *acer)
 static int linuwu_sense_gaming_decode_result(const struct wmi_buffer *output,
 					     u64 *result)
 {
+	if (!output->data)
+		return -EIO;
+
 	if (output->length >= sizeof(*result))
 		*result = get_unaligned_le64(output->data);
 	else if (output->length >= sizeof(u32))
@@ -171,20 +174,23 @@ static int linuwu_sense_gaming_get_sys_info(struct acer_wmi *acer, u32 command,
 				   ACER_WMID_GET_GAMING_SYS_INFO_METHODID,
 				   &input, &output, sizeof(u32));
 	if (err)
-		return err;
+		goto out;
 
 	err = linuwu_sense_gaming_decode_result(&output, &result);
-	kfree(output.data);
 	if (err)
-		return err;
+		goto out;
 
 	/* The return status must be zero for the operation to have succeeded */
-	if (FIELD_GET(ACER_PREDATOR_V4_RETURN_STATUS_BIT_MASK, result))
-		return -EIO;
+	if (FIELD_GET(ACER_PREDATOR_V4_RETURN_STATUS_BIT_MASK, result)) {
+		err = -EIO;
+		goto out;
+	}
 
 	*out = result;
-
-	return 0;
+	err = 0;
+out:
+	kfree(output.data);
+	return err;
 }
 
 int linuwu_sense_gaming_get_power_source(struct acer_wmi *acer, bool *on_ac)
@@ -269,18 +275,19 @@ static int linuwu_sense_gaming_set_misc_setting(struct acer_wmi *acer,
 				   ACER_WMID_SET_GAMING_MISC_SETTING_METHODID,
 				   &input, &output, sizeof(u32));
 	if (err)
-		return err;
+		goto out;
 
 	err = linuwu_sense_gaming_decode_result(&output, &result);
-	kfree(output.data);
 	if (err)
-		return err;
+		goto out;
 
 	/* The return status must be zero for the operation to have succeeded */
 	if (FIELD_GET(ACER_GAMING_MISC_SETTING_STATUS_MASK, result))
-		return -EIO;
+		err = -EIO;
 
-	return 0;
+out:
+	kfree(output.data);
+	return err;
 }
 
 static int linuwu_sense_gaming_get_misc_setting(struct acer_wmi *acer,
@@ -306,20 +313,23 @@ static int linuwu_sense_gaming_get_misc_setting(struct acer_wmi *acer,
 				   ACER_WMID_GET_GAMING_MISC_SETTING_METHODID,
 				   &input, &output, sizeof(u32));
 	if (err)
-		return err;
+		goto out;
 
 	err = linuwu_sense_gaming_decode_result(&output, &result);
-	kfree(output.data);
 	if (err)
-		return err;
+		goto out;
 
 	/* The return status must be zero for the operation to have succeeded */
-	if (FIELD_GET(ACER_GAMING_MISC_SETTING_STATUS_MASK, result))
-		return -EIO;
+	if (FIELD_GET(ACER_GAMING_MISC_SETTING_STATUS_MASK, result)) {
+		err = -EIO;
+		goto out;
+	}
 
 	*value = FIELD_GET(ACER_GAMING_MISC_SETTING_VALUE_MASK, result);
-
-	return 0;
+	err = 0;
+out:
+	kfree(output.data);
+	return err;
 }
 
 /*
@@ -463,19 +473,21 @@ int linuwu_sense_gaming_get_lcd_override(struct acer_wmi *acer, int *state)
 				   &input, &output, sizeof(u32));
 	if (err) {
 		linuwu_sense_pr_dbg("Error getting lcd override status: %d\n", err);
-		return err;
+		goto out;
 	}
 
 	err = linuwu_sense_gaming_decode_result(&output, &result);
-	kfree(output.data);
 	if (err) {
 		linuwu_sense_pr_dbg("Error getting lcd override status: %d\n", err);
-		return err;
+		goto out;
 	}
 
 	linuwu_sense_pr_dbg("lcd override get status: %llu\n", result);
 	*state = result == 0x1000001000000 ? 1 : result == 0x1000000 ? 0 : -1;
-	return 0;
+	err = 0;
+out:
+	kfree(output.data);
+	return err;
 }
 
 int linuwu_sense_gaming_set_lcd_override(struct acer_wmi *acer, bool enable)
@@ -500,18 +512,20 @@ int linuwu_sense_gaming_set_lcd_override(struct acer_wmi *acer, bool enable)
 				   &input, &output, sizeof(u32));
 	if (err) {
 		pr_err("Error setting lcd override status: %d\n", err);
-		return err;
+		goto out;
 	}
 
 	err = linuwu_sense_gaming_decode_result(&output, &result);
-	kfree(output.data);
 	if (err) {
 		pr_err("Error setting lcd override status: %d\n", err);
-		return err;
+		goto out;
 	}
 
 	linuwu_sense_pr_dbg("lcd override set status: %llu\n", result);
-	return 0;
+	err = 0;
+out:
+	kfree(output.data);
+	return err;
 }
 
 int linuwu_sense_gaming_get_backlight_timeout(struct acer_wmi *acer, int *state)
@@ -555,6 +569,9 @@ int linuwu_sense_gaming_set_backlight_timeout(struct acer_wmi *acer,
 	}
 
 	linuwu_sense_pr_dbg("backlight_timeout set status: %llu\n", result);
+	if (result)
+		return -EIO;
+
 	return 0;
 }
 
@@ -582,57 +599,27 @@ int linuwu_sense_gaming_get_boot_animation_sound(struct acer_wmi *acer,
 				   &input, &output, sizeof(u32));
 	if (err) {
 		linuwu_sense_pr_dbg("Error getting boot_animation_sound status: %d\n", err);
-		return err;
+		goto out;
 	}
 
 	err = linuwu_sense_gaming_decode_result(&output, &result);
-	kfree(output.data);
 	if (err) {
 		linuwu_sense_pr_dbg("Error getting boot_animation_sound status: %d\n", err);
-		return err;
+		goto out;
 	}
 
 	linuwu_sense_pr_dbg("boot_animation_sound get status: %llu\n", result);
 	*state = result == 0x100 ? 1 : result == 0 ? 0 : -1;
-	return 0;
+	err = 0;
+out:
+	kfree(output.data);
+	return err;
 }
 
 int linuwu_sense_gaming_set_boot_animation_sound(struct acer_wmi *acer,
 						 bool enable)
 {
-	struct wmi_device *wdev =
-		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_GAMING);
-	u64 input_value = 0;
-	struct wmi_buffer input = {
-		.length = sizeof(input_value),
-		.data = &input_value,
-	};
-	struct wmi_buffer output = {};
-	u64 result;
-	int err;
-
-	if (!wdev)
-		return -ENODEV;
-
 	linuwu_sense_pr_dbg("boot_animation_sound set value: %d\n", enable);
-	input_value |= FIELD_PREP(ACER_GAMING_MISC_SETTING_INDEX_MASK,
-				  ACER_WMID_MISC_SETTING_BOOT_ANIMATION_SOUND);
-	input_value |= FIELD_PREP(ACER_GAMING_MISC_SETTING_VALUE_MASK, enable);
-	err = wmidev_invoke_method(wdev, 0,
-				   ACER_WMID_SET_GAMING_MISC_SETTING_METHODID,
-				   &input, &output, sizeof(u32));
-	if (err) {
-		pr_err("Error setting boot_animation_sound status: %d\n", err);
-		return err;
-	}
-
-	err = linuwu_sense_gaming_decode_result(&output, &result);
-	kfree(output.data);
-	if (err) {
-		pr_err("Error setting boot_animation_sound status: %d\n", err);
-		return err;
-	}
-
-	linuwu_sense_pr_dbg("boot_animation_sound set status: %llu\n", result);
-	return 0;
+	return linuwu_sense_gaming_set_misc_setting(
+		acer, ACER_WMID_MISC_SETTING_BOOT_ANIMATION_SOUND, enable);
 }

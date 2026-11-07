@@ -28,6 +28,9 @@
 static int linuwu_sense_apge_decode_result(const struct wmi_buffer *output,
 					   u64 *result)
 {
+	if (!output->data)
+		return -EIO;
+
 	if (output->length >= sizeof(*result))
 		*result = get_unaligned_le64(output->data);
 	else if (output->length >= sizeof(u32))
@@ -52,13 +55,15 @@ int linuwu_sense_apge_set_app_status(
 
 	if (!wdev)
 		return -ENODEV;
+	if (!status || !result)
+		return -EINVAL;
 
 	err = wmidev_invoke_method(wdev, 0, LINUWU_SENSE_APGE_SET_FUNCTION,
 				   &input, &output, sizeof(*result));
 	if (err)
-		return err;
+		goto out;
 
-	if (output.length < sizeof(*result)) {
+	if (!output.data || output.length < sizeof(*result)) {
 		err = -EIO;
 		goto out;
 	}
@@ -87,14 +92,18 @@ int linuwu_sense_apge_get_function(struct wmi_device *wdev, u64 function,
 	err = wmidev_invoke_method(wdev, 0, LINUWU_SENSE_APGE_GET_FUNCTION,
 				   &input, &output, sizeof(u32));
 	if (err)
-		return err;
+		goto out;
 
 	err = linuwu_sense_apge_decode_result(&output, &result);
+	if (err)
+		goto out;
+
+	*value = result;
+
+out:
 	kfree(output.data);
 	if (err)
 		return err;
-
-	*value = result;
 
 	return 0;
 }
@@ -116,14 +125,13 @@ int linuwu_sense_apge_set_function_value(struct wmi_device *wdev, u64 function,
 	err = wmidev_invoke_method(wdev, 0, LINUWU_SENSE_APGE_SET_FUNCTION,
 				   &input, &output, sizeof(u32));
 	if (err)
-		return err;
+		goto out;
 
 	err = linuwu_sense_apge_decode_result(&output, &result);
+	if (!err)
+		*status = result;
+
+out:
 	kfree(output.data);
-	if (err)
-		return err;
-
-	*status = result;
-
-	return 0;
+	return err;
 }

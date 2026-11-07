@@ -111,6 +111,9 @@ int linuwu_sense_battery_set_usb_charging(struct wmi_device *wdev, u8 percent)
 	}
 
 	linuwu_sense_pr_dbg("usb charging set status: %llu\n", result);
+	if (result)
+		return -EIO;
+
 	return 0;
 }
 
@@ -135,6 +138,8 @@ int linuwu_sense_battery_get_mode(struct wmi_device *wdev,
 
 	if (!wdev)
 		return -ENODEV;
+	if (!enabled)
+		return -EINVAL;
 
 	err = wmidev_invoke_method(
 		wdev, 0, ACER_WMID_GET_BATTERY_HEALTH_CONTROL_STATUS_METHODID,
@@ -145,11 +150,28 @@ int linuwu_sense_battery_get_mode(struct wmi_device *wdev,
 		goto out;
 	}
 
-	if (output.length < sizeof(ret)) {
+	if (!output.data || output.length < sizeof(ret)) {
 		err = -EIO;
 		goto out;
 	}
 	memcpy(&ret, output.data, sizeof(ret));
+
+	/* Method 20's two-byte uReturn status must be zero on success. */
+	if (ret.uReturn[0] || ret.uReturn[1]) {
+		err = -EIO;
+		goto out;
+	}
+
+	/* uFunctionList is a bitmask using the SET function-mask values. */
+	if (mode != LINUWU_SENSE_BATTERY_MODE_HEALTH &&
+	    mode != LINUWU_SENSE_BATTERY_MODE_CALIBRATION) {
+		err = -EINVAL;
+		goto out;
+	}
+	if (!(ret.uFunctionList & (u8)mode)) {
+		err = -EOPNOTSUPP;
+		goto out;
+	}
 
 	switch (mode) {
 	case LINUWU_SENSE_BATTERY_MODE_HEALTH:
@@ -200,7 +222,7 @@ int linuwu_sense_battery_set_mode(struct wmi_device *wdev,
 		goto out;
 	}
 
-	if (output.length < sizeof(ret)) {
+	if (!output.data || output.length < sizeof(ret)) {
 		err = -EIO;
 		goto out;
 	}
@@ -298,6 +320,8 @@ static int acer_battery_ext_set_property(struct power_supply *psy,
 	ret = linuwu_sense_battery_set_mode(
 		linuwu_sense_endpoint_get(acer, ACER_WMI_GUID_WMID_BATTERY),
 		LINUWU_SENSE_BATTERY_MODE_HEALTH, status);
+	if (!ret)
+		linuwu_sense_note_write_locked(acer, LS_FEAT_BATTERY_HEALTH);
 	mutex_unlock(&acer->lock);
 
 	return ret;

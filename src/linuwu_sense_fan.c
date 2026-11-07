@@ -46,14 +46,22 @@ static int linuwu_sense_fan_set_behavior(struct wmi_device *wdev, u64 behavior)
 				   ACER_WMID_SET_GAMING_FAN_BEHAVIOR_METHODID,
 				   &input, &output, sizeof(result));
 	if (err)
-		return err;
+		goto out;
+	if (!output.data || output.length < sizeof(result)) {
+		err = -EIO;
+		goto out;
+	}
 
 	result = get_unaligned_le64(output.data);
-	kfree(output.data);
 
 	/* The return status must be zero for the operation to have succeeded. */
 	if (FIELD_GET(ACER_GAMING_FAN_BEHAVIOR_STATUS_MASK, result))
-		return -EIO;
+		err = -EIO;
+
+out:
+	kfree(output.data);
+	if (err)
+		return err;
 
 	return 0;
 }
@@ -124,13 +132,18 @@ int linuwu_sense_fan_get_mode(struct wmi_device *wdev,
 				   ACER_WMID_GET_GAMING_FAN_BEHAVIOR_METHODID,
 				   &input, &output, sizeof(result));
 	if (err)
-		return err;
+		goto out;
+	if (!output.data || output.length < sizeof(result)) {
+		err = -EIO;
+		goto out;
+	}
 
 	result = get_unaligned_le64(output.data);
-	kfree(output.data);
 
 	if (FIELD_GET(ACER_GAMING_FAN_BEHAVIOR_STATUS_MASK, result))
-		return -EIO;
+		err = -EIO;
+	if (err)
+		goto out;
 
 	if (fan == LINUWU_SENSE_FAN_CPU)
 		mode = FIELD_GET(ACER_GAMING_FAN_BEHAVIOR_GET_CPU_MODE_MASK,
@@ -140,11 +153,16 @@ int linuwu_sense_fan_get_mode(struct wmi_device *wdev,
 				 result);
 
 	if (mode < LINUWU_SENSE_FAN_MODE_AUTO ||
-	    mode > LINUWU_SENSE_FAN_MODE_CUSTOM)
-		return -EIO;
+	    mode > LINUWU_SENSE_FAN_MODE_CUSTOM) {
+		err = -EIO;
+		goto out;
+	}
 
 	*fan_mode = mode;
-	return 0;
+	err = 0;
+out:
+	kfree(output.data);
+	return err;
 }
 
 int linuwu_sense_fan_set_speed(struct wmi_device *wdev,
@@ -183,21 +201,32 @@ int linuwu_sense_fan_set_speed(struct wmi_device *wdev,
 				   ACER_WMID_SET_GAMING_FAN_SPEED_METHODID,
 				   &input, &output, sizeof(result));
 	if (err)
-		return err;
+		goto out;
+	if (!output.data || output.length < sizeof(result)) {
+		err = -EIO;
+		goto out;
+	}
 
 	result = get_unaligned_le64(output.data);
-	kfree(output.data);
 
 	switch (FIELD_GET(ACER_GAMING_FAN_SPEED_STATUS_MASK, result)) {
 	case 0x00:
-		return 0;
+		err = 0;
+		break;
 	case 0x01:
-		return -ENOENT;
+		err = -ENOENT;
+		break;
 	case 0x02:
-		return -EINVAL;
+		err = -EINVAL;
+		break;
 	default:
-		return -EIO;
+		err = -EIO;
+		break;
 	}
+
+out:
+	kfree(output.data);
+	return err;
 }
 
 int linuwu_sense_fan_get_speed(struct wmi_device *wdev,
@@ -235,17 +264,27 @@ int linuwu_sense_fan_get_speed(struct wmi_device *wdev,
 				   ACER_WMID_GET_GAMING_FAN_SPEED_METHODID,
 				   &input, &output, sizeof(result));
 	if (err)
-		return err;
+		goto out;
+	if (!output.data || output.length < sizeof(result)) {
+		err = -EIO;
+		goto out;
+	}
 
 	result = get_unaligned_le64(output.data);
-	kfree(output.data);
 
-	if (FIELD_GET(ACER_GAMING_FAN_SPEED_STATUS_MASK, result))
-		return -EIO;
+	if (FIELD_GET(ACER_GAMING_FAN_SPEED_STATUS_MASK, result)) {
+		err = -EIO;
+		goto out;
+	}
 
 	*percentage = FIELD_GET(ACER_GAMING_FAN_SPEED_VALUE_MASK, result);
-	if (*percentage > 100)
-		return -EIO;
+	if (*percentage > 100) {
+		err = -EIO;
+		goto out;
+	}
 
-	return 0;
+	err = 0;
+out:
+	kfree(output.data);
+	return err;
 }
